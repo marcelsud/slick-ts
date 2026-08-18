@@ -22,11 +22,15 @@ var packagesSource string
 //go:embed strict.mjs
 var strictSource string
 
+//go:embed describe.mjs
+var describeSource string
+
 type analyzerResponse struct {
-	Diagnostics []Diagnostic      `json:"diagnostics"`
-	Graph       []operationalNode `json:"graph"`
-	Cache       CacheStats        `json:"cache"`
-	Failure     *Failure          `json:"failure,omitempty"`
+	Diagnostics  []Diagnostic        `json:"diagnostics"`
+	Graph        []operationalNode   `json:"graph"`
+	Descriptions []SymbolDescription `json:"descriptions"`
+	Cache        CacheStats          `json:"cache"`
+	Failure      *Failure            `json:"failure,omitempty"`
 }
 
 type NodeAnalyzer struct{}
@@ -37,7 +41,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		return failed("missing_toolchain", "Node.js was not found in PATH")
 	}
 
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+analyzerSource)
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+analyzerSource)
 	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+config)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -63,17 +67,19 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		response.Diagnostics = []Diagnostic{}
 	}
 	return Analysis{
-		Diagnostics: response.Diagnostics,
-		Summaries:   summarize(response.Graph),
-		Cache:       response.Cache,
-		Failure:     response.Failure,
+		Diagnostics:  response.Diagnostics,
+		Summaries:    summarize(response.Graph),
+		Descriptions: response.Descriptions,
+		Cache:        response.Cache,
+		Failure:      response.Failure,
 	}
 }
 
 func failed(kind, message string) Analysis {
 	return Analysis{
-		Diagnostics: []Diagnostic{},
-		Summaries:   []OperationalSummary{},
-		Failure:     &Failure{Kind: kind, Message: message},
+		Diagnostics:  []Diagnostic{},
+		Summaries:    []OperationalSummary{},
+		Descriptions: []SymbolDescription{},
+		Failure:      &Failure{Kind: kind, Message: message},
 	}
 }

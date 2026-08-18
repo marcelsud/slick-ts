@@ -7,8 +7,8 @@ const supportedTypeScript = "5.9.3";
 const configPath = path.resolve(process.env.SLICK_CONFIG_PATH);
 const projectRoot = path.dirname(configPath);
 
-function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }) {
-  return JSON.stringify({ diagnostics, graph, cache, ...(failure && { failure }) });
+function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }, descriptions = []) {
+  return JSON.stringify({ diagnostics, graph, cache, descriptions, ...(failure && { failure }) });
 }
 
 function failure(kind, message, diagnostics = []) {
@@ -150,6 +150,9 @@ const resolved = projectReferenceFailure
 const operational = projectReferenceFailure
   ? { graph: [], cache: { hits: 0, misses: 0 } }
   : analyzeOperational(resolved.program, projectRoot, ts, resolved.packages);
+const descriptions = projectReferenceFailure
+  ? []
+  : analyzeDescriptions(resolved.program, operational.graph, projectRoot, ts, resolved.packages);
 const slickDiagnostics = projectReferenceFailure
   ? []
   : analyzeStrict(program, projectRoot, ts, diagnostics);
@@ -161,5 +164,6 @@ process.stdout.write(
       : undefined,
     operational.graph,
     operational.cache,
+    descriptions,
   ),
 );

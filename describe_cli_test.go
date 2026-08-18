@@ -1,0 +1,263 @@
+package slick_test
+
+import (
+	"encoding/json"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+)
+
+type describeOutput struct {
+	Version     int                `json:"version"`
+	Command     string             `json:"command"`
+	Success     bool               `json:"success"`
+	Project     string             `json:"project"`
+	Diagnostics []diagnostic       `json:"diagnostics"`
+	Contract    *describedContract `json:"contract"`
+	Error       *failure           `json:"error"`
+}
+
+type describedContract struct {
+	CanonicalName  string                   `json:"canonicalName"`
+	Name           string                   `json:"name"`
+	Kind           string                   `json:"kind"`
+	Visibility     string                   `json:"visibility"`
+	Documentation  string                   `json:"documentation"`
+	Aliases        []string                 `json:"aliases"`
+	Location       sourceLocation           `json:"location"`
+	TypeParameters []describedTypeParameter `json:"typeParameters"`
+	Parameters     []describedParameter     `json:"parameters"`
+	Return         *describedType           `json:"return"`
+	Members        []string                 `json:"members"`
+	Package        *describedPackage        `json:"package"`
+	Execution      string                   `json:"execution"`
+	Errors         []describedFact          `json:"errors"`
+	Effects        []describedFact          `json:"effects"`
+	Completeness   string                   `json:"completeness"`
+	Unresolved     []describedUnresolved    `json:"unresolved"`
+}
+
+type sourceLocation struct {
+	Path  string      `json:"path"`
+	Range sourceRange `json:"range"`
+}
+
+type describedType struct {
+	Kind       string               `json:"kind"`
+	Name       string               `json:"name"`
+	Value      string               `json:"value"`
+	Members    []describedType      `json:"members"`
+	Element    *describedType       `json:"element"`
+	Elements   []describedType      `json:"elements"`
+	Arguments  []describedType      `json:"arguments"`
+	Properties []describedProperty  `json:"properties"`
+	Parameters []describedParameter `json:"parameters"`
+	Return     *describedType       `json:"return"`
+}
+
+type describedProperty struct {
+	Name     string        `json:"name"`
+	Optional bool          `json:"optional"`
+	Readonly bool          `json:"readonly"`
+	Type     describedType `json:"type"`
+}
+
+type describedParameter struct {
+	Name     string        `json:"name"`
+	Optional bool          `json:"optional"`
+	Rest     bool          `json:"rest"`
+	Type     describedType `json:"type"`
+}
+
+type describedTypeParameter struct {
+	Name       string         `json:"name"`
+	Constraint *describedType `json:"constraint"`
+	Default    *describedType `json:"default"`
+}
+
+type describedPackage struct {
+	Name           string   `json:"name"`
+	Version        string   `json:"version"`
+	Export         string   `json:"export"`
+	Conditions     []string `json:"conditions"`
+	Declaration    string   `json:"declaration"`
+	Implementation string   `json:"implementation"`
+}
+
+type describedFact struct {
+	Name string `json:"name"`
+}
+
+type describedUnresolved struct {
+	Symbol  string            `json:"symbol"`
+	Reason  string            `json:"reason"`
+	Package *describedPackage `json:"package"`
+}
+
+func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
+	root := describeProject(t)
+	function := runDescribe(t, root, "load")
+	if function.Contract.CanonicalName != "src/main.ts::load" || function.Contract.Kind != "function" || function.Contract.Visibility != "exported" || function.Contract.Documentation != "Load one value." {
+		t.Fatalf("local function: %+v", function.Contract)
+	}
+	if function.Contract.Execution != "asynchronous" || function.Contract.Completeness != "complete" || len(function.Contract.TypeParameters) != 1 || len(function.Contract.Parameters) != 2 {
+		t.Fatalf("function contract: %+v", function.Contract)
+	}
+	if function.Contract.TypeParameters[0].Constraint == nil || function.Contract.TypeParameters[0].Constraint.Name != "string" || function.Contract.Return == nil || function.Contract.Return.Kind != "reference" || function.Contract.Return.Name != "Promise" {
+		t.Fatalf("structured signature: %+v", function.Contract)
+	}
+
+	method := runDescribe(t, root, "Client.request")
+	if method.Contract.Kind != "method" || method.Contract.Execution != "asynchronous" || !reflect.DeepEqual(factNames(method.Contract.Effects), []string{"network"}) {
+		t.Fatalf("class method: %+v", method.Contract)
+	}
+
+	namespace := runDescribe(t, root, "Tools")
+	if namespace.Contract.Kind != "namespace" || !reflect.DeepEqual(namespace.Contract.Members, []string{"parse"}) {
+		t.Fatalf("namespace: %+v", namespace.Contract)
+	}
+}
+
+func TestDescribeDependencyContractsMatchOperationalFacts(t *testing.T) {
+	root := describeProject(t)
+	remote := runDescribe(t, root, "demo.remote")
+	if remote.Contract.Package == nil || remote.Contract.Package.Name != "demo" || remote.Contract.Package.Version != "1.2.3" || remote.Contract.Package.Declaration != "node_modules/demo/index.d.ts" || remote.Contract.Package.Implementation != "node_modules/demo/index.js" {
+		t.Fatalf("dependency identity: %+v", remote.Contract.Package)
+	}
+	if !reflect.DeepEqual(factNames(remote.Contract.Effects), []string{"network"}) || remote.Contract.Completeness != "complete" {
+		t.Fatalf("dependency effect: %+v", remote.Contract)
+	}
+
+	failure := runDescribe(t, root, "demo.fail")
+	if !reflect.DeepEqual(factNames(failure.Contract.Errors), []string{"PackageError"}) {
+		t.Fatalf("dependency error: %+v", failure.Contract.Errors)
+	}
+
+	partial := runDescribe(t, root, "demo.partial")
+	if partial.Contract.Completeness != "partial" || len(partial.Contract.Unresolved) != 1 || partial.Contract.Unresolved[0].Reason != "dynamic_code" || partial.Contract.Unresolved[0].Package == nil || partial.Contract.Unresolved[0].Package.Name != "demo" {
+		t.Fatalf("partial dependency: %+v", partial.Contract)
+	}
+}
+
+func TestDescribeJSONIsDeterministicAndVersioned(t *testing.T) {
+	root := describeProject(t)
+	first, firstErr, firstCode := runSlick(t, root, nil, "describe", "--json", "load")
+	second, secondErr, secondCode := runSlick(t, root, nil, "describe", "--json", "load")
+	if firstCode != 0 || secondCode != 0 || firstErr != "" || secondErr != "" || first != second {
+		t.Fatalf("codes %d/%d, stderr %q/%q, output:\n%s\n%s", firstCode, secondCode, firstErr, secondErr, first, second)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(first), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sortedKeys(raw), []string{"command", "contract", "diagnostics", "project", "success", "version"}) {
+		t.Fatalf("version 1 document shape changed: %v", sortedKeys(raw))
+	}
+	var contract map[string]json.RawMessage
+	if err := json.Unmarshal(raw["contract"], &contract); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"aliases", "canonicalName", "completeness", "documentation", "effects", "errors", "execution", "kind", "location", "members", "name", "parameters", "return", "typeParameters", "unresolved", "visibility"}
+	if !reflect.DeepEqual(sortedKeys(contract), expected) {
+		t.Fatalf("version 1 contract shape changed without a version bump: %v", sortedKeys(contract))
+	}
+}
+
+func TestDescribeUnknownAndAmbiguousSymbols(t *testing.T) {
+	root := describeProject(t)
+	ambiguous, stderr, code := runSlick(t, root, nil, "describe", "--json", "same")
+	var ambiguousDocument describeOutput
+	if err := json.Unmarshal([]byte(ambiguous), &ambiguousDocument); err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 || stderr != "" || ambiguousDocument.Error == nil || ambiguousDocument.Error.Kind != "ambiguous_symbol" || len(ambiguousDocument.Error.Alternatives) != 2 {
+		t.Fatalf("ambiguous exit %d, stderr %q, output %+v", code, stderr, ambiguousDocument)
+	}
+
+	unknown, _, unknownCode := runSlick(t, root, nil, "describe", "--json", "loa")
+	var unknownDocument describeOutput
+	if err := json.Unmarshal([]byte(unknown), &unknownDocument); err != nil {
+		t.Fatal(err)
+	}
+	if unknownCode != 1 || unknownDocument.Error == nil || unknownDocument.Error.Kind != "unknown_symbol" || !reflect.DeepEqual(unknownDocument.Error.Alternatives, []string{"src/main.ts::load"}) {
+		t.Fatalf("unknown exit %d, output %+v", unknownCode, unknownDocument)
+	}
+
+	human, humanErr, humanCode := runSlick(t, root, nil, "describe", "Client.request")
+	if humanCode != 0 || humanErr != "" || !strings.Contains(human, "src/main.ts::Client.request") || !strings.Contains(human, "effect: network") || !strings.Contains(human, "completeness: complete") {
+		t.Fatalf("human exit %d, stderr %q, output %q", humanCode, humanErr, human)
+	}
+}
+
+func describeProject(t *testing.T) string {
+	t.Helper()
+	return project(t, strictConfig, map[string]string{
+		"package.json": `{"type":"module"}`,
+		"src/main.ts": `
+import { fail, partial, remote } from "demo";
+/** Load one value. */
+export async function load<T extends string>(input: T, count = 1): Promise<T> { void count; return input; }
+export class Client {
+	/** Request a URL. */
+	async request(url: string): Promise<Response> { return fetch(url); }
+}
+export namespace Tools {
+	export function parse(value: unknown): string { return typeof value === "string" ? value : ""; }
+}
+export async function useRemote() { return remote(); }
+export function useFail() { return fail(); }
+export function usePartial() { return partial(); }
+`,
+		"src/a.ts": `export function same(): number { return 1; }`,
+		"src/b.ts": `export function same(): number { return 2; }`,
+		"node_modules/demo/package.json": `{
+			"name":"demo",
+			"version":"1.2.3",
+			"type":"module",
+			"exports":{ ".": { "types":"./index.d.ts", "import":"./index.js" } }
+		}`,
+		"node_modules/demo/index.d.ts": `
+export declare class PackageError extends Error {}
+export declare function remote(): Promise<Response>;
+export declare function fail(): never;
+export declare function partial(): unknown;
+`,
+		"node_modules/demo/index.js": `
+export class PackageError extends Error {}
+export function remote() { return fetch("https://example.test"); }
+export function fail() { throw new PackageError("failed"); }
+export function partial() { return eval("1"); }
+`,
+	})
+}
+
+func runDescribe(t *testing.T, root, symbol string) describeOutput {
+	t.Helper()
+	output, stderr, code := runSlick(t, root, nil, "describe", "--json", symbol)
+	var document describeOutput
+	if err := json.Unmarshal([]byte(output), &document); err != nil {
+		t.Fatalf("decode %q: %v", output, err)
+	}
+	if code != 0 || stderr != "" || !document.Success || document.Version != 1 || document.Command != "describe" || document.Contract == nil {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+	return document
+}
+
+func factNames(facts []describedFact) []string {
+	names := make([]string, len(facts))
+	for index, fact := range facts {
+		names[index] = fact.Name
+	}
+	return names
+}
+
+func sortedKeys(values map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}

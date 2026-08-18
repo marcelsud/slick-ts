@@ -1,0 +1,282 @@
+function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
+  const checker = program.getTypeChecker();
+  const descriptions = [];
+  const byCanonical = new Map();
+
+  function stablePath(fileName) {
+    return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
+  }
+
+  function sourceRange(node) {
+    const sourceFile = node.getSourceFile();
+    const startOffset = node.getStart(sourceFile);
+    const endOffset = node.getEnd();
+    const start = sourceFile.getLineAndCharacterOfPosition(startOffset);
+    const end = sourceFile.getLineAndCharacterOfPosition(endOffset);
+    return {
+      start: { line: start.line + 1, column: start.character + 1, offset: startOffset },
+      end: { line: end.line + 1, column: end.character + 1, offset: endOffset },
+    };
+  }
+
+  function isCallable(node) {
+    return ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node) ||
+      ts.isConstructorDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node);
+  }
+
+  function nameNode(node) {
+    if (node.name) return node.name;
+    if (ts.isConstructorDeclaration(node)) return node.parent.name;
+    const parent = node.parent;
+    if ((ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent) || ts.isPropertyAssignment(parent)) && parent.name) {
+      return parent.name;
+    }
+    return node;
+  }
+
+  function resolveAlias(symbol) {
+    return symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  }
+
+  function primitiveName(type) {
+    const flags = type.flags;
+    if (flags & ts.TypeFlags.Any) return "any";
+    if (flags & ts.TypeFlags.Unknown) return "unknown";
+    if (flags & ts.TypeFlags.Never) return "never";
+    if (flags & ts.TypeFlags.Void) return "void";
+    if (flags & ts.TypeFlags.Undefined) return "undefined";
+    if (flags & ts.TypeFlags.Null) return "null";
+    if (flags & ts.TypeFlags.BooleanLike) return "boolean";
+    if (flags & ts.TypeFlags.StringLike) return "string";
+    if (flags & ts.TypeFlags.NumberLike) return "number";
+    if (flags & ts.TypeFlags.BigIntLike) return "bigint";
+    if (flags & ts.TypeFlags.ESSymbolLike) return "symbol";
+    return undefined;
+  }
+
+  function sortTypes(values) {
+    return values.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+
+  function typeDescription(type, location, depth = 0, seen = new Set()) {
+    const primitive = primitiveName(type);
+    if (type.isLiteral?.()) {
+      return { kind: "literal", name: primitive, value: String(type.value ?? (type.intrinsicName ?? "")) };
+    }
+    if (primitive) return { kind: "primitive", name: primitive };
+    if (type.isUnion?.()) return { kind: "union", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, seen))) };
+    if (type.isIntersection?.()) return { kind: "intersection", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, seen))) };
+    if (checker.isArrayType(type)) {
+      const element = checker.getTypeArguments(type)[0] ?? checker.getAnyType();
+      return { kind: "array", element: typeDescription(element, location, depth + 1, seen) };
+    }
+    if (checker.isTupleType(type)) {
+      return { kind: "tuple", elements: checker.getTypeArguments(type).map((value) => typeDescription(value, location, depth + 1, seen)) };
+    }
+    const symbol = type.aliasSymbol ?? type.symbol;
+    const name = symbol ? checker.getFullyQualifiedName(symbol).replace(/^".*"\./, "") : checker.typeToString(type);
+    if (depth >= 4 || seen.has(type)) return { kind: "reference", name };
+    const nextSeen = new Set(seen);
+    nextSeen.add(type);
+    if (type.flags & ts.TypeFlags.TypeParameter) return { kind: "type_parameter", name };
+    const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
+    if (signatures.length > 0) {
+      const signature = signatures[0];
+      return {
+        kind: "callable",
+        parameters: parameterDescriptions(signature, location, depth + 1, nextSeen),
+        return: typeDescription(checker.getReturnTypeOfSignature(signature), location, depth + 1, nextSeen),
+      };
+    }
+    const typeArguments = type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : [];
+    const properties = depth < 2 && (!symbol || symbol.name === "__type") ? checker.getPropertiesOfType(type).map((property) => {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? location;
+      return {
+        name: property.name,
+        optional: Boolean(property.flags & ts.SymbolFlags.Optional),
+        readonly: (property.declarations ?? []).some((value) =>
+          value.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword),
+        ),
+        type: typeDescription(checker.getTypeOfSymbolAtLocation(property, declaration), declaration, depth + 1, nextSeen),
+      };
+    }).sort((left, right) => left.name.localeCompare(right.name)) : [];
+    return {
+      kind: properties.length > 0 ? "object" : "reference",
+      name,
+      ...(typeArguments.length > 0 && { arguments: typeArguments.map((value) => typeDescription(value, location, depth + 1, nextSeen)) }),
+      ...(properties.length > 0 && { properties }),
+    };
+  }
+
+  function parameterDescriptions(signature, location, depth = 0, seen = new Set()) {
+    return signature.parameters.map((parameter) => {
+      const declaration = parameter.valueDeclaration ?? parameter.declarations?.[0] ?? location;
+      return {
+        name: parameter.name,
+        optional: Boolean(parameter.flags & ts.SymbolFlags.Optional) || Boolean(declaration.questionToken || declaration.initializer),
+        rest: Boolean(declaration.dotDotDotToken),
+        type: typeDescription(checker.getTypeOfSymbolAtLocation(parameter, declaration), declaration, depth, seen),
+      };
+    });
+  }
+
+  function typeParameters(signature, location) {
+    return (signature.typeParameters ?? []).map((parameter) => ({
+      name: parameter.symbol?.name ?? checker.typeToString(parameter),
+      ...(parameter.getConstraint() && { constraint: typeDescription(parameter.getConstraint(), location) }),
+      ...(parameter.getDefault() && { default: typeDescription(parameter.getDefault(), location) }),
+    }));
+  }
+
+  function visibility(node) {
+    const kinds = new Set(node.modifiers?.map((modifier) => modifier.kind) ?? []);
+    if (kinds.has(ts.SyntaxKind.PrivateKeyword)) return "private";
+    if (kinds.has(ts.SyntaxKind.ProtectedKeyword)) return "protected";
+    if (kinds.has(ts.SyntaxKind.PublicKeyword)) return "public";
+    if (kinds.has(ts.SyntaxKind.ExportKeyword) || node.parent && ts.isSourceFile(node.parent)) return "exported";
+    return "local";
+  }
+
+  function kind(node) {
+    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return "function";
+    if (ts.isMethodDeclaration(node)) return "method";
+    if (ts.isGetAccessorDeclaration(node)) return "getter";
+    if (ts.isSetAccessorDeclaration(node)) return "setter";
+    if (ts.isConstructorDeclaration(node)) return "constructor";
+    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return "class";
+    if (ts.isModuleDeclaration(node)) return "namespace";
+    return "symbol";
+  }
+
+  function documentation(symbol) {
+    return symbol ? ts.displayPartsToString(symbol.getDocumentationComment(checker)) : "";
+  }
+
+  function aliases(canonical, name, packageIdentity) {
+    const qualified = canonical.includes("::") ? canonical.split("::")[1] : canonical;
+    const values = new Set([canonical, qualified, name]);
+    if (packageIdentity) {
+      const subpath = packageIdentity.export === "." ? "" : packageIdentity.export.slice(1);
+      values.add(`${packageIdentity.name}${subpath}.${qualified}`);
+      values.add(`${packageIdentity.name}${subpath}#${qualified}`);
+    }
+    return [...values].filter(Boolean).sort();
+  }
+
+  function makeDescription(node, canonical, packageIdentity, members = []) {
+    const namedNode = nameNode(node);
+    const symbol = resolveAlias(checker.getSymbolAtLocation(namedNode));
+    const signature = isCallable(node) ? checker.getSignatureFromDeclaration(node) : undefined;
+    const name = canonical.split(".").pop().split("::").pop().replace(/^(get|set):/, "");
+    return {
+      canonicalName: canonical,
+      name,
+      kind: kind(node),
+      visibility: visibility(node),
+      documentation: documentation(symbol),
+      aliases: aliases(canonical, name, packageIdentity),
+      location: { path: stablePath(node.getSourceFile().fileName), range: sourceRange(namedNode) },
+      typeParameters: signature ? typeParameters(signature, node) : [],
+      parameters: signature ? parameterDescriptions(signature, node) : [],
+      ...(signature && { return: typeDescription(checker.getReturnTypeOfSignature(signature), node) }),
+      members: [...members].sort(),
+      ...(packageIdentity && { package: packageIdentity }),
+    };
+  }
+
+  function sourceFile(fileName) {
+    return program.getSourceFile(fileName) ?? program.getSourceFiles().find((value) => path.resolve(value.fileName) === path.resolve(fileName));
+  }
+
+  function exportsOf(fileName) {
+    const symbol = sourceFile(fileName)?.symbol;
+    return symbol ? new Map(checker.getExportsOfModule(symbol).map((value) => [value.name, resolveAlias(value)])) : new Map();
+  }
+
+  function declaredNode(dependency, canonical) {
+    const parts = canonical.split("::")[1]?.split(".") ?? [];
+    if (parts.length === 0) return undefined;
+    let symbol = exportsOf(dependency.declarationFile).get(parts[0].replace(/^(get|set):/, ""));
+    for (const part of parts.slice(1)) {
+      const name = part.replace(/^(get|set):/, "");
+      symbol = symbol?.members?.get(name) ?? symbol?.exports?.get(name);
+      symbol = resolveAlias(symbol);
+    }
+    if (!symbol) return undefined;
+    const declarations = symbol.declarations ?? [];
+    const prefix = parts.at(-1)?.split(":")[0];
+    return declarations.find((value) => prefix === "get" ? ts.isGetAccessorDeclaration(value) : prefix === "set" ? ts.isSetAccessorDeclaration(value) : isCallable(value)) ?? declarations[0];
+  }
+
+  function authoredNode(entry) {
+    const file = sourceFile(path.resolve(projectRoot, entry.location.path));
+    let found;
+    function visit(node) {
+      if (found) return;
+      if (isCallable(node) && sourceRange(nameNode(node)).start.offset === entry.location.range.start.offset) {
+        found = node;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    }
+    if (file) visit(file);
+    return found;
+  }
+
+  for (const entry of graph) {
+    const dependency = entry.package && packages.find((value) => value.identity.name === entry.package.name && value.identity.export === entry.package.export);
+    const node = dependency?.declarationFile ? declaredNode(dependency, entry.symbol) : authoredNode(entry);
+    if (!node) continue;
+    const description = makeDescription(node, entry.symbol, entry.package);
+    descriptions.push(description);
+    byCanonical.set(description.canonicalName, description);
+  }
+
+  function containerCanonical(node) {
+    const parts = [node.name?.getText(node.getSourceFile())];
+    let current = node.parent;
+    while (current && !ts.isSourceFile(current)) {
+      if ((ts.isClassDeclaration(current) || ts.isModuleDeclaration(current)) && current.name) {
+        parts.unshift(current.name.getText(current.getSourceFile()));
+      }
+      current = current.parent;
+    }
+    return `${stablePath(node.getSourceFile().fileName)}::${parts.filter(Boolean).join(".")}`;
+  }
+
+  const packageBySource = new Map();
+  for (const dependency of packages) {
+    for (const fileName of dependency.sources ?? []) packageBySource.set(path.resolve(fileName), dependency);
+  }
+  for (const file of program.getSourceFiles()) {
+    const absolute = path.resolve(file.fileName);
+    const relative = path.relative(projectRoot, absolute);
+    const authored = !file.isDeclarationFile && relative !== "" && relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) && !relative.split(path.sep).includes("node_modules");
+    const dependency = packageBySource.get(absolute);
+    if (!authored && !dependency) continue;
+    function visit(node) {
+      if ((ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)) && node.name) {
+        const canonical = containerCanonical(node);
+        if (!byCanonical.has(canonical)) {
+          const directMembers = [];
+          const children = ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)
+            ? node.body.statements
+            : node.members ?? [];
+          for (const child of children) {
+            if (child.name) directMembers.push(child.name.getText(child.getSourceFile()));
+          }
+          const declarationNode = dependency?.declarationFile ? declaredNode(dependency, canonical) : node;
+          const description = makeDescription(declarationNode ?? node, canonical, dependency?.identity, directMembers);
+          descriptions.push(description);
+          byCanonical.set(canonical, description);
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(file);
+  }
+
+  return descriptions.sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
+}
