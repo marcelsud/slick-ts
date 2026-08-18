@@ -229,32 +229,28 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 func writeContract(output io.Writer, contract SymbolContract) {
 	fmt.Fprintf(output, "%s (%s, %s)\n", contract.CanonicalName, contract.Kind, contract.Visibility)
 	fmt.Fprintf(output, "source: %s:%d:%d\n", contract.Location.Path, contract.Location.Range.Start.Line, contract.Location.Range.Start.Column)
-	if contract.Documentation != "" {
-		fmt.Fprintln(output, "documentation:", contract.Documentation)
-	}
-	if len(contract.TypeParameters) > 0 {
-		value, _ := json.Marshal(contract.TypeParameters)
-		fmt.Fprintln(output, "type parameters:", string(value))
-	}
-	if len(contract.Parameters) > 0 {
-		value, _ := json.Marshal(contract.Parameters)
-		fmt.Fprintln(output, "parameters:", string(value))
-	}
+	fmt.Fprintln(output, "documentation:", contract.Documentation)
+	writeContractField(output, "aliases", contract.Aliases)
+	writeContractField(output, "type parameters", contract.TypeParameters)
+	writeContractField(output, "parameters", contract.Parameters)
+	writeContractField(output, "signatures", contract.Signatures)
 	if contract.Return != nil {
-		value, _ := json.Marshal(contract.Return)
-		fmt.Fprintln(output, "return:", string(value))
+		writeContractField(output, "return", contract.Return)
+	}
+	writeContractField(output, "members", contract.Members)
+	if contract.Package != nil {
+		writeContractField(output, "package", contract.Package)
 	}
 	if contract.Execution != "" {
 		fmt.Fprintln(output, "execution:", contract.Execution)
 	}
-	for _, fact := range contract.Errors {
-		fmt.Fprintln(output, "error:", fact.Name)
-	}
-	for _, fact := range contract.Effects {
-		fmt.Fprintln(output, "effect:", fact.Name)
-	}
+	writeContractField(output, "errors", contract.Errors)
+	writeContractField(output, "effects", contract.Effects)
 	fmt.Fprintln(output, "completeness:", contract.Completeness)
-	for _, leaf := range contract.Unresolved {
-		fmt.Fprintf(output, "unresolved: %s (%s)\n", leaf.Symbol, leaf.Reason)
-	}
+	writeContractField(output, "unresolved", contract.Unresolved)
+}
+
+func writeContractField(output io.Writer, name string, value any) {
+	encoded, _ := json.Marshal(value)
+	fmt.Fprintf(output, "%s: %s\n", name, encoded)
 }

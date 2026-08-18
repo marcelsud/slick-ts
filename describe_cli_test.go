@@ -29,6 +29,7 @@ type describedContract struct {
 	TypeParameters []describedTypeParameter `json:"typeParameters"`
 	Parameters     []describedParameter     `json:"parameters"`
 	Return         *describedType           `json:"return"`
+	Signatures     []describedSignature     `json:"signatures"`
 	Members        []string                 `json:"members"`
 	Package        *describedPackage        `json:"package"`
 	Execution      string                   `json:"execution"`
@@ -75,6 +76,11 @@ type describedTypeParameter struct {
 	Constraint *describedType `json:"constraint"`
 	Default    *describedType `json:"default"`
 }
+type describedSignature struct {
+	TypeParameters []describedTypeParameter `json:"typeParameters"`
+	Parameters     []describedParameter     `json:"parameters"`
+	Return         describedType            `json:"return"`
+}
 
 type describedPackage struct {
 	Name           string   `json:"name"`
@@ -109,13 +115,29 @@ func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
 	}
 
 	method := runDescribe(t, root, "Client.request")
-	if method.Contract.Kind != "method" || method.Contract.Execution != "asynchronous" || !reflect.DeepEqual(factNames(method.Contract.Effects), []string{"network"}) {
+	if method.Contract.Kind != "method" || method.Contract.Visibility != "public" || method.Contract.Execution != "asynchronous" || !reflect.DeepEqual(factNames(method.Contract.Effects), []string{"network"}) {
 		t.Fatalf("class method: %+v", method.Contract)
 	}
 
 	namespace := runDescribe(t, root, "Tools")
 	if namespace.Contract.Kind != "namespace" || !reflect.DeepEqual(namespace.Contract.Members, []string{"parse"}) {
 		t.Fatalf("namespace: %+v", namespace.Contract)
+	}
+	helper := runDescribe(t, root, "helper")
+	if helper.Contract.Visibility != "local" {
+		t.Fatalf("local visibility: %+v", helper.Contract)
+	}
+	arrow := runDescribe(t, root, "exportedArrow")
+	if arrow.Contract.Visibility != "exported" {
+		t.Fatalf("arrow visibility: %+v", arrow.Contract)
+	}
+	overload := runDescribe(t, root, "overload")
+	if len(overload.Contract.Signatures) != 2 {
+		t.Fatalf("overloads: %+v", overload.Contract.Signatures)
+	}
+	box := runDescribe(t, root, "Box")
+	if len(box.Contract.TypeParameters) != 1 || box.Contract.TypeParameters[0].Constraint == nil || box.Contract.TypeParameters[0].Constraint.Name != "string" {
+		t.Fatalf("generic class: %+v", box.Contract)
 	}
 }
 
@@ -138,6 +160,17 @@ func TestDescribeDependencyContractsMatchOperationalFacts(t *testing.T) {
 	if partial.Contract.Completeness != "partial" || len(partial.Contract.Unresolved) != 1 || partial.Contract.Unresolved[0].Reason != "dynamic_code" || partial.Contract.Unresolved[0].Package == nil || partial.Contract.Unresolved[0].Package.Name != "demo" {
 		t.Fatalf("partial dependency: %+v", partial.Contract)
 	}
+	convert := runDescribe(t, root, "demo.convert")
+	if len(convert.Contract.Signatures) != 2 {
+		t.Fatalf("dependency overloads: %+v", convert.Contract.Signatures)
+	}
+
+	declarationOnly := runDescribe(t, root, "decl-only.only")
+	if declarationOnly.Contract.Completeness != "partial" || len(declarationOnly.Contract.Unresolved) != 1 ||
+		declarationOnly.Contract.Unresolved[0].Reason != "declaration_only" ||
+		declarationOnly.Contract.Package == nil || declarationOnly.Contract.Package.Implementation != "" {
+		t.Fatalf("declaration-only dependency: %+v", declarationOnly.Contract)
+	}
 }
 
 func TestDescribeJSONIsDeterministicAndVersioned(t *testing.T) {
@@ -158,7 +191,7 @@ func TestDescribeJSONIsDeterministicAndVersioned(t *testing.T) {
 	if err := json.Unmarshal(raw["contract"], &contract); err != nil {
 		t.Fatal(err)
 	}
-	expected := []string{"aliases", "canonicalName", "completeness", "documentation", "effects", "errors", "execution", "kind", "location", "members", "name", "parameters", "return", "typeParameters", "unresolved", "visibility"}
+	expected := []string{"aliases", "canonicalName", "completeness", "documentation", "effects", "errors", "execution", "kind", "location", "members", "name", "parameters", "return", "signatures", "typeParameters", "unresolved", "visibility"}
 	if !reflect.DeepEqual(sortedKeys(contract), expected) {
 		t.Fatalf("version 1 contract shape changed without a version bump: %v", sortedKeys(contract))
 	}
@@ -180,12 +213,15 @@ func TestDescribeUnknownAndAmbiguousSymbols(t *testing.T) {
 	if err := json.Unmarshal([]byte(unknown), &unknownDocument); err != nil {
 		t.Fatal(err)
 	}
-	if unknownCode != 1 || unknownDocument.Error == nil || unknownDocument.Error.Kind != "unknown_symbol" || !reflect.DeepEqual(unknownDocument.Error.Alternatives, []string{"src/main.ts::load"}) {
+	if unknownCode != 1 || unknownDocument.Error == nil || unknownDocument.Error.Kind != "unknown_symbol" || !reflect.DeepEqual(unknownDocument.Error.Alternatives, []string{"src/main.ts::load", "src/main.ts::overload"}) {
 		t.Fatalf("unknown exit %d, output %+v", unknownCode, unknownDocument)
 	}
 
 	human, humanErr, humanCode := runSlick(t, root, nil, "describe", "Client.request")
-	if humanCode != 0 || humanErr != "" || !strings.Contains(human, "src/main.ts::Client.request") || !strings.Contains(human, "effect: network") || !strings.Contains(human, "completeness: complete") {
+	if humanCode != 0 || humanErr != "" || !strings.Contains(human, "src/main.ts::Client.request") ||
+		!strings.Contains(human, `effects: [{"name":"network"`) ||
+		!strings.Contains(human, `"provenance"`) || !strings.Contains(human, "aliases:") ||
+		!strings.Contains(human, "completeness: complete") {
 		t.Fatalf("human exit %d, stderr %q, output %q", humanCode, humanErr, human)
 	}
 }
@@ -195,19 +231,28 @@ func describeProject(t *testing.T) string {
 	return project(t, strictConfig, map[string]string{
 		"package.json": `{"type":"module"}`,
 		"src/main.ts": `
-import { fail, partial, remote } from "demo";
+import { convert, fail, partial, remote } from "demo";
+import { only } from "decl-only";
+function helper(): number { return 0; }
+export const exportedArrow = (): number => helper();
+export function overload(value: string): string;
+export function overload(value: number): number;
+export function overload(value: string | number): string | number { return value; }
 /** Load one value. */
 export async function load<T extends string>(input: T, count = 1): Promise<T> { void count; return input; }
 export class Client {
 	/** Request a URL. */
 	async request(url: string): Promise<Response> { return fetch(url); }
 }
+export class Box<T extends string> { constructor(readonly value: T) {} }
 export namespace Tools {
 	export function parse(value: unknown): string { return typeof value === "string" ? value : ""; }
 }
 export async function useRemote() { return remote(); }
 export function useFail() { return fail(); }
 export function usePartial() { return partial(); }
+export function useConvert() { return convert("value"); }
+export function useOnly() { return only(); }
 `,
 		"src/a.ts": `export function same(): number { return 1; }`,
 		"src/b.ts": `export function same(): number { return 2; }`,
@@ -222,13 +267,22 @@ export declare class PackageError extends Error {}
 export declare function remote(): Promise<Response>;
 export declare function fail(): never;
 export declare function partial(): unknown;
+export declare function convert(value: string): string;
+export declare function convert(value: number): number;
 `,
 		"node_modules/demo/index.js": `
 export class PackageError extends Error {}
 export function remote() { return fetch("https://example.test"); }
 export function fail() { throw new PackageError("failed"); }
 export function partial() { return eval("1"); }
+export function convert(value) { return value; }
 `,
+		"node_modules/decl-only/package.json": `{
+			"name":"decl-only",
+			"version":"4.0.0",
+			"types":"index.d.ts"
+		}`,
+		"node_modules/decl-only/index.d.ts": `export declare function only(): void;`,
 	})
 }
 

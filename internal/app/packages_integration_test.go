@@ -92,7 +92,7 @@ func TestPackageSummaryCacheReusesAndInvalidatesEntries(t *testing.T) {
 
 	first := analyzePackageFixture(t, config)
 	second := analyzePackageFixture(t, config)
-	if first.Cache.Misses != 2 || second.Cache.Hits != 2 || second.Cache.Misses != 0 {
+	if first.Cache.Misses != 3 || second.Cache.Hits != 3 || second.Cache.Misses != 0 {
 		t.Fatalf("cache first=%+v second=%+v", first.Cache, second.Cache)
 	}
 	firstJSON, _ := json.Marshal(first.Summaries)
@@ -122,7 +122,7 @@ func TestPackageSummaryCacheReusesAndInvalidatesEntries(t *testing.T) {
 		}
 	}
 	invalidated := analyzePackageFixture(t, config)
-	if invalidated.Cache.Misses != 2 || invalidated.Cache.Hits != 0 {
+	if invalidated.Cache.Misses != 3 || invalidated.Cache.Hits != 0 {
 		t.Fatalf("schema change did not invalidate cache: %+v", invalidated.Cache)
 	}
 

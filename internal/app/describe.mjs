@@ -129,13 +129,57 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     }));
   }
 
-  function visibility(node) {
-    const kinds = new Set(node.modifiers?.map((modifier) => modifier.kind) ?? []);
-    if (kinds.has(ts.SyntaxKind.PrivateKeyword)) return "private";
+  function declarationTypeParameters(node) {
+    return (node.typeParameters ?? []).map((parameter) => ({
+      name: parameter.name.text,
+      ...(parameter.constraint && { constraint: typeDescription(checker.getTypeFromTypeNode(parameter.constraint), parameter) }),
+      ...(parameter.default && { default: typeDescription(checker.getTypeFromTypeNode(parameter.default), parameter) }),
+    }));
+  }
+
+  function modifierKinds(node) {
+    const result = new Set(node.modifiers?.map((modifier) => modifier.kind) ?? []);
+    let current = node.parent;
+    while (current && !ts.isSourceFile(current)) {
+      for (const modifier of current.modifiers ?? []) result.add(modifier.kind);
+      if (ts.isVariableStatement(current) || ts.isClassDeclaration(current) || ts.isModuleDeclaration(current)) break;
+      current = current.parent;
+    }
+    return result;
+  }
+
+  function visibility(node, symbol) {
+    const kinds = modifierKinds(node);
+    if (node.name && ts.isPrivateIdentifier(node.name) || kinds.has(ts.SyntaxKind.PrivateKeyword)) return "private";
     if (kinds.has(ts.SyntaxKind.ProtectedKeyword)) return "protected";
-    if (kinds.has(ts.SyntaxKind.PublicKeyword)) return "public";
-    if (kinds.has(ts.SyntaxKind.ExportKeyword) || node.parent && ts.isSourceFile(node.parent)) return "exported";
+    if (
+      kinds.has(ts.SyntaxKind.PublicKeyword) ||
+      (node.parent && (ts.isClassDeclaration(node.parent) || ts.isClassExpression(node.parent)))
+    ) return "public";
+    const moduleSymbol = node.getSourceFile().symbol;
+    const exported = moduleSymbol && checker.getExportsOfModule(moduleSymbol)
+      .some((value) => resolveAlias(value) === symbol);
+    if (kinds.has(ts.SyntaxKind.ExportKeyword) || exported) return "exported";
     return "local";
+  }
+
+  function signatureDescriptions(symbol, node) {
+    let signatures = [];
+    if (symbol) {
+      signatures = checker.getSignaturesOfType(
+        checker.getTypeOfSymbolAtLocation(symbol, node),
+        ts.SignatureKind.Call,
+      );
+    }
+    if (signatures.length === 0 && isCallable(node)) {
+      const direct = checker.getSignatureFromDeclaration(node);
+      if (direct) signatures = [direct];
+    }
+    return signatures.map((signature) => ({
+      typeParameters: typeParameters(signature, node),
+      parameters: parameterDescriptions(signature, node),
+      return: typeDescription(checker.getReturnTypeOfSignature(signature), node),
+    }));
   }
 
   function kind(node) {
@@ -167,19 +211,21 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
   function makeDescription(node, canonical, packageIdentity, members = []) {
     const namedNode = nameNode(node);
     const symbol = resolveAlias(checker.getSymbolAtLocation(namedNode));
-    const signature = isCallable(node) ? checker.getSignatureFromDeclaration(node) : undefined;
+    const signatures = signatureDescriptions(symbol, node);
+    const primary = signatures[0];
     const name = canonical.split(".").pop().split("::").pop().replace(/^(get|set):/, "");
     return {
       canonicalName: canonical,
       name,
       kind: kind(node),
-      visibility: visibility(node),
+      visibility: visibility(node, symbol),
       documentation: documentation(symbol),
       aliases: aliases(canonical, name, packageIdentity),
       location: { path: stablePath(node.getSourceFile().fileName), range: sourceRange(namedNode) },
-      typeParameters: signature ? typeParameters(signature, node) : [],
-      parameters: signature ? parameterDescriptions(signature, node) : [],
-      ...(signature && { return: typeDescription(checker.getReturnTypeOfSignature(signature), node) }),
+      typeParameters: primary?.typeParameters ?? declarationTypeParameters(node),
+      parameters: primary?.parameters ?? [],
+      ...(primary && { return: primary.return }),
+      signatures,
       members: [...members].sort(),
       ...(packageIdentity && { package: packageIdentity }),
     };

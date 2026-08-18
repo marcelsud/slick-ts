@@ -37,6 +37,11 @@ type TypeParameterDescription struct {
 	Constraint *TypeDescription `json:"constraint,omitempty"`
 	Default    *TypeDescription `json:"default,omitempty"`
 }
+type SignatureDescription struct {
+	TypeParameters []TypeParameterDescription `json:"typeParameters"`
+	Parameters     []ParameterDescription     `json:"parameters"`
+	Return         TypeDescription            `json:"return"`
+}
 
 type SymbolDescription struct {
 	CanonicalName  string                     `json:"canonicalName"`
@@ -49,6 +54,7 @@ type SymbolDescription struct {
 	TypeParameters []TypeParameterDescription `json:"typeParameters"`
 	Parameters     []ParameterDescription     `json:"parameters"`
 	Return         *TypeDescription           `json:"return,omitempty"`
+	Signatures     []SignatureDescription     `json:"signatures"`
 	Members        []string                   `json:"members"`
 	Package        *PackageIdentity           `json:"package,omitempty"`
 }
