@@ -150,8 +150,7 @@ const resolved = projectReferenceFailure
 const operational = projectReferenceFailure
   ? { graph: [], cache: { hits: 0, misses: 0 } }
   : analyzeOperational(resolved.program, projectRoot, ts, resolved.packages);
-const slickDiagnostics = projectReferenceFailure ||
-  diagnostics.some(({ category }) => category === ts.DiagnosticCategory.Error)
+const slickDiagnostics = projectReferenceFailure
   ? []
   : analyzeStrict(program, projectRoot, ts, diagnostics);
 process.stdout.write(

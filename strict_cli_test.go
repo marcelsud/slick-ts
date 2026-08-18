@@ -152,6 +152,43 @@ export async function rejected(flag: boolean) {
 	}
 }
 
+func TestCheckPromiseOwnershipFollowsValuesAndBranches(t *testing.T) {
+	rejected := project(t, strictConfig, map[string]string{
+		"src/main.ts": `
+function ignore(_: unknown): Promise<void> { return Promise.resolve(); }
+async function work(): Promise<void> {}
+export async function rejected(items: number[]) {
+	const pending = fetch("https://example.test/unowned");
+	await ignore(pending);
+	items.map(async () => { await work(); });
+}
+`,
+	})
+	output, _, code := runSlick(t, rejected, nil, "check", "--json")
+	document := decodeOutput(t, output)
+	codes := slickCodes(document.Diagnostics)
+	if code != 1 || len(codes) != 2 || codes[0] != 1004 || codes[1] != 1004 {
+		t.Fatalf("exit %d, Promise diagnostics %v, output %+v", code, codes, document)
+	}
+
+	accepted := project(t, strictConfig, map[string]string{
+		"src/main.ts": `
+export async function accepted(flag: boolean, items: number[]) {
+	let pending: Promise<Response>;
+	if (flag) pending = fetch("https://example.test/one");
+	else pending = fetch("https://example.test/two");
+	await pending;
+	const jobs = items.map(async () => { await fetch("https://example.test/job"); });
+	await Promise.all(jobs);
+}
+`,
+	})
+	acceptedOutput, acceptedErr, acceptedCode := runSlick(t, accepted, nil, "check", "--json")
+	if acceptedCode != 0 || acceptedErr != "" || !decodeOutput(t, acceptedOutput).Success {
+		t.Fatalf("exit %d, stderr %q, output %s", acceptedCode, acceptedErr, acceptedOutput)
+	}
+}
+
 func TestCheckTruthinessAndAssertionBoundaries(t *testing.T) {
 	root := project(t, strictConfig, map[string]string{
 		"src/main.ts": `
@@ -168,6 +205,11 @@ export function assertions(value: string | undefined, unknownValue: unknown) {
 	value!;
 	unknownValue as string;
 	<string>unknownValue;
+}
+export function safeAssertions(text: string) {
+	const widened = "x" as string;
+	const weakened = text as unknown;
+	return [widened, weakened, text!];
 }
 `,
 	})
@@ -213,6 +255,27 @@ export function strict(value: string) {
 	}
 	if implicitCount != 1 {
 		t.Fatalf("implicit-any diagnostics=%d: %+v", implicitCount, document.Diagnostics)
+	}
+}
+
+func TestCheckRunsSlickRulesBesideUnrelatedTypeScriptErrors(t *testing.T) {
+	root := project(t, strictConfig, map[string]string{
+		"src/typescript-error.ts": `export function invalid(value) { return 1; }`,
+		"src/slick-error.ts":      `export function invalid() { fetch("https://example.test"); }`,
+	})
+	output, _, code := runSlick(t, root, nil, "check", "--json")
+	document := decodeOutput(t, output)
+	if code != 1 {
+		t.Fatalf("exit %d, output %+v", code, document)
+	}
+	foundTypeScript := false
+	foundSlick := false
+	for _, diagnostic := range document.Diagnostics {
+		foundTypeScript = foundTypeScript || diagnostic.Source == "typescript" && diagnostic.Code == 7006
+		foundSlick = foundSlick || diagnostic.Source == "slick" && diagnostic.Code == 1004
+	}
+	if !foundTypeScript || !foundSlick {
+		t.Fatalf("missing TypeScript/Slick diagnostics: %+v", document.Diagnostics)
 	}
 }
 

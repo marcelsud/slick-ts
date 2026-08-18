@@ -25,7 +25,7 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
       code: 1004,
       title: "Unconsumed Promise",
       explanation: "A Promise was created without an owner for its completion or rejection.",
-      repairs: ["Await the Promise", "Return it to the caller", "Join it with Promise.all", "Pass it to a modeled ownership transfer"],
+      repairs: ["Await the Promise", "Return it to the caller", "Await or return Promise.all([...])", "Pass it to a modeled ownership transfer"],
     },
   };
 
@@ -189,12 +189,22 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
   }
 
   function ignoredCallback(functionNode) {
-    if (!ts.isCallExpression(functionNode.parent) || !functionNode.parent.arguments.includes(functionNode)) {
-      return false;
-    }
+    const call = functionNode.parent;
+    if (!ts.isCallExpression(call) || !call.arguments.includes(functionNode)) return false;
     const contextual = checker.getContextualType(functionNode);
     const signature = contextual && checker.getSignaturesOfType(contextual, ts.SignatureKind.Call)[0];
-    return Boolean(signature && checker.getReturnTypeOfSignature(signature).flags & ts.TypeFlags.Void);
+    if (signature && checker.getReturnTypeOfSignature(signature).flags & ts.TypeFlags.Void) return true;
+    if (
+      ts.isPropertyAccessExpression(call.expression) &&
+      ["map", "flatMap"].includes(call.expression.name.text)
+    ) {
+      if (ts.isCallExpression(call.parent) && call.parent.arguments.includes(call) && isPromiseCombinator(call.parent)) {
+        return false;
+      }
+      const assigned = assignedSymbol(call);
+      return !(assigned && assignedPromiseConsumed(call, assigned));
+    }
+    return false;
   }
 
   function enclosingCallbackReturnIgnored(node) {
@@ -208,7 +218,15 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
   }
 
   const consumedSymbols = new Map();
-  function collectIdentifiers(node) {
+  function collectPromiseValues(node) {
+    while (
+      ts.isParenthesizedExpression(node) ||
+      ts.isAsExpression(node) ||
+      ts.isTypeAssertionExpression(node) ||
+      ts.isNonNullExpression(node)
+    ) {
+      node = node.expression;
+    }
     if (ts.isIdentifier(node)) {
       const symbol = symbolOf(node);
       if (symbol) {
@@ -216,18 +234,24 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
         uses.push(node);
         consumedSymbols.set(symbol, uses);
       }
-      return;
+    } else if (ts.isArrayLiteralExpression(node)) {
+      for (const element of node.elements) collectPromiseValues(ts.isSpreadElement(element) ? element.expression : element);
     }
-    ts.forEachChild(node, collectIdentifiers);
   }
 
   function discoverConsumption(node) {
     if (ts.isAwaitExpression(node)) {
-      collectIdentifiers(node.expression);
+      collectPromiseValues(node.expression);
     } else if (ts.isReturnStatement(node) && node.expression && !enclosingCallbackReturnIgnored(node)) {
-      collectIdentifiers(node.expression);
+      collectPromiseValues(node.expression);
     } else if (ts.isCallExpression(node) && (isPromiseCombinator(node) || isOwnershipTransfer(node))) {
-      for (const argument of node.arguments) collectIdentifiers(argument);
+      for (const argument of node.arguments) collectPromiseValues(argument);
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ["then", "catch", "finally"].includes(node.expression.name.text)
+    ) {
+      collectPromiseValues(node.expression.expression);
     }
     ts.forEachChild(node, discoverConsumption);
   }
@@ -265,6 +289,7 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
 
   function assignedPromiseConsumed(expression, symbol) {
     const start = expression.getStart();
+    const creationConditions = conditionalAncestors(expression);
     let nextAssignment = Number.POSITIVE_INFINITY;
     function findNext(node) {
       if (node !== expression) {
@@ -274,13 +299,16 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
             symbolOf(node.left) === symbol)
         ) {
           const position = node.getStart();
-          if (position > start) nextAssignment = Math.min(nextAssignment, position);
+          const conditions = conditionalAncestors(node);
+          const definitelyOverwrites = [...conditions].every((condition) => creationConditions.has(condition));
+          if (position > start && definitelyOverwrites) {
+            nextAssignment = Math.min(nextAssignment, position);
+          }
         }
       }
       ts.forEachChild(node, findNext);
     }
     findNext(expression.getSourceFile());
-    const creationConditions = conditionalAncestors(expression);
     return (consumedSymbols.get(symbol) ?? []).some((use) => {
       const position = use.getStart();
       if (position <= start || position >= nextAssignment) return false;
@@ -290,7 +318,6 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
       return true;
     });
   }
-
 
   function expressionConsumed(expression) {
     const assigned = assignedSymbol(expression);
@@ -349,8 +376,18 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
       report(node, rules.any, "authored value flow type: any");
     }
 
-    if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node)) {
-      report(node, rules.assertion, `assertion: ${node.getText(node.getSourceFile())}`);
+    if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
+      const source = checker.getTypeAtLocation(node.expression);
+      const target = checker.getTypeFromTypeNode(node.type);
+      if (!checker.isTypeAssignableTo(source, target)) {
+        report(node, rules.assertion, `assertion: ${checker.typeToString(source)} to ${checker.typeToString(target)}`);
+      }
+    } else if (ts.isNonNullExpression(node)) {
+      const source = checker.getTypeAtLocation(node.expression);
+      const target = checker.getTypeAtLocation(node);
+      if (!checker.isTypeAssignableTo(source, target)) {
+        report(node, rules.assertion, `non-null assertion: ${checker.typeToString(source)} to ${checker.typeToString(target)}`);
+      }
     }
 
     if (ts.isIfStatement(node) || ts.isWhileStatement(node) || ts.isDoStatement(node) || ts.isConditionalExpression(node)) {
@@ -380,10 +417,17 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
     ts.forEachChild(node, visit);
   }
 
+  const syntacticErrorFiles = new Set(
+    program.getSyntacticDiagnostics()
+      .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error && diagnostic.file)
+      .map((diagnostic) => path.resolve(diagnostic.file.fileName)),
+  );
   const authored = program.getSourceFiles().filter((sourceFile) => {
-    const relative = path.relative(projectRoot, path.resolve(sourceFile.fileName));
-    return !sourceFile.isDeclarationFile && relative !== "" && relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) && !relative.split(path.sep).includes("node_modules");
+    const absolute = path.resolve(sourceFile.fileName);
+    const relative = path.relative(projectRoot, absolute);
+    return !sourceFile.isDeclarationFile && !syntacticErrorFiles.has(absolute) &&
+      relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) &&
+      !relative.split(path.sep).includes("node_modules");
   });
   for (const sourceFile of authored) collectAnyOrigins(sourceFile);
   for (const sourceFile of authored) discoverConsumption(sourceFile);
