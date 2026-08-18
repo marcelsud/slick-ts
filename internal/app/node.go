@@ -25,24 +25,31 @@ var strictSource string
 //go:embed describe.mjs
 var describeSource string
 
+//go:embed build.mjs
+var buildSource string
+
 type analyzerResponse struct {
 	Diagnostics  []Diagnostic        `json:"diagnostics"`
 	Graph        []operationalNode   `json:"graph"`
 	Descriptions []SymbolDescription `json:"descriptions"`
+	Outputs      []BuildOutput       `json:"outputs"`
 	Cache        CacheStats          `json:"cache"`
 	Failure      *Failure            `json:"failure,omitempty"`
 }
 
 type NodeAnalyzer struct{}
 
-func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
+func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysis {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		return failed("missing_toolchain", "Node.js was not found in PATH")
 	}
 
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+analyzerSource)
-	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+config)
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+buildSource+"\n"+analyzerSource)
+	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+request.Config)
+	if request.EmitRoot != "" {
+		cmd.Env = append(cmd.Env, "SLICK_EMIT_ROOT="+request.EmitRoot)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -70,6 +77,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		Diagnostics:  response.Diagnostics,
 		Summaries:    summarize(response.Graph),
 		Descriptions: response.Descriptions,
+		Outputs:      response.Outputs,
 		Cache:        response.Cache,
 		Failure:      response.Failure,
 	}
@@ -80,6 +88,7 @@ func failed(kind, message string) Analysis {
 		Diagnostics:  []Diagnostic{},
 		Summaries:    []OperationalSummary{},
 		Descriptions: []SymbolDescription{},
+		Outputs:      []BuildOutput{},
 		Failure:      &Failure{Kind: kind, Message: message},
 	}
 }

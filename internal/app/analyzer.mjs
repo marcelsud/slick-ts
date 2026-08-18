@@ -7,8 +7,8 @@ const supportedTypeScript = "5.9.3";
 const configPath = path.resolve(process.env.SLICK_CONFIG_PATH);
 const projectRoot = path.dirname(configPath);
 
-function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }, descriptions = []) {
-  return JSON.stringify({ diagnostics, graph, cache, descriptions, ...(failure && { failure }) });
+function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }, descriptions = [], outputs = []) {
+  return JSON.stringify({ diagnostics, graph, cache, descriptions, outputs, ...(failure && { failure }) });
 }
 
 function failure(kind, message, diagnostics = []) {
@@ -156,14 +156,18 @@ const descriptions = projectReferenceFailure
 const slickDiagnostics = projectReferenceFailure
   ? []
   : analyzeStrict(program, projectRoot, ts, diagnostics);
+const build = projectReferenceFailure
+  ? { diagnostics: [], outputs: [] }
+  : emitBuild(program, ts, diagnostics, slickDiagnostics);
 process.stdout.write(
   response(
-    normalize([...diagnostics, ...slickDiagnostics]),
+    normalize([...diagnostics, ...slickDiagnostics, ...build.diagnostics]),
     projectReferenceFailure
       ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
-      : undefined,
+      : build.failure,
     operational.graph,
     operational.cache,
     descriptions,
+    build.outputs,
   ),
 );

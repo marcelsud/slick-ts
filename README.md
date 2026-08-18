@@ -10,8 +10,8 @@ ownership without custom TypeScript syntax or a new runtime.
 
 ## Status
 
-`slick check` is available now. The command returns TypeScript and Slick
-diagnostics in human or versioned JSON output.
+`slick check`, `slick describe`, and `slick build` are available. Commands
+return human or deterministic versioned JSON output.
 
 The analyzer also creates internal operational summaries for authored and package source.
 Each summary contains:
@@ -144,6 +144,23 @@ package identity where applicable. Human output renders the same document.
 Short names are accepted only when unambiguous. Unknown and ambiguous names
 return nonzero with deterministic `error.alternatives`.
 
+## Build a project
+
+```sh
+./slick build [path]
+./slick build --json [path]
+```
+
+Build runs the same TypeScript and Slick checks, then delegates JavaScript,
+declaration, and source-map generation to TypeScript 5.9.3. TypeScript compiler
+options remain authoritative. Slick does not rewrite functions, inject an async
+runtime, or add an Effect dependency.
+
+Emit is staged before installation. A TypeScript error, Slick error, interrupt,
+emit failure, or output-install failure leaves pre-existing outputs unchanged.
+Successful JSON output lists installed files relative to the project.
+
+
 ## Failures and exit status
 
 Structured failures use these `error.kind` values.
@@ -156,6 +173,7 @@ Structured failures use these `error.kind` values.
 - `analyzer_failure`
 - `unknown_symbol`
 - `ambiguous_symbol`
+- `emit_failure`
 
 Slick uses these exit codes.
 
@@ -231,6 +249,7 @@ Run static checks.
 go vet ./...
 node --check internal/app/analyzer.mjs
 node --check internal/app/describe.mjs
+node --check internal/app/build.mjs
 node --check internal/app/packages.mjs
 node --check internal/app/strict.mjs
 node --check internal/app/operational.mjs
@@ -243,6 +262,8 @@ The public CLI tests cover these cases.
 - Deterministic JSON
 - Infrastructure failures
 - Interrupt cleanup
+- TypeScript-equivalent build output and source maps
+- Atomic output installation and rollback
 
 The operational tests combine these cases.
 
@@ -254,12 +275,8 @@ The operational tests combine these cases.
 ## Scope
 
 Slick accepts normal TypeScript source. Slick does not add syntax extensions.
-The current command does not do these tasks.
-
-- Emit JavaScript
-- Watch files
-- Start a daemon
-- Run an editor server
+The current commands do not watch files, start a daemon, or run an editor
+server.
 
 See the [open issues](https://github.com/marcelsud/slick-ts/issues) for the
 remaining implementation plan.

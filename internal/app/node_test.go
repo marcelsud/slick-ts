@@ -17,7 +17,7 @@ func TestNodeAnalyzerUsesTypeScriptDiagnostics(t *testing.T) {
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 
-	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil {
 		t.Fatalf("unexpected failure: %+v", result.Failure)
 	}
@@ -50,7 +50,7 @@ async function caller(): Promise<void> {
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 
-	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil || len(result.Diagnostics) != 0 {
 		t.Fatalf("analysis failed: failure=%+v diagnostics=%+v", result.Failure, result.Diagnostics)
 	}

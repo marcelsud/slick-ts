@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -21,12 +22,13 @@ type Document struct {
 	Project     string          `json:"project,omitempty"`
 	Diagnostics []Diagnostic    `json:"diagnostics"`
 	Contract    *SymbolContract `json:"contract,omitempty"`
+	Outputs     []string        `json:"outputs,omitempty"`
 	Error       *Failure        `json:"error,omitempty"`
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: slick <check|describe> [options]")
+		fmt.Fprintln(stderr, "usage: slick <check|describe|build> [options]")
 		return 2
 	}
 	switch args[0] {
@@ -34,8 +36,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer 
 		return runCheck(ctx, args, stdout, stderr, analyzer)
 	case "describe":
 		return runDescribe(ctx, args, stdout, stderr, analyzer)
+	case "build":
+		return runBuild(ctx, args, stdout, stderr, analyzer)
 	default:
-		fmt.Fprintln(stderr, "usage: slick <check|describe> [options]")
+		fmt.Fprintln(stderr, "usage: slick <check|describe|build> [options]")
 		return 2
 	}
 }
@@ -67,7 +71,7 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer, anal
 		return 1
 	}
 
-	analysis := analyzer.Analyze(ctx, config)
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config})
 	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
 		return 130
 	}
@@ -113,7 +117,7 @@ func runDescribe(ctx context.Context, args []string, stdout, stderr io.Writer, a
 		return 1
 	}
 
-	analysis := analyzer.Analyze(ctx, config)
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config})
 	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
 		return 130
 	}
@@ -143,6 +147,221 @@ func runDescribe(ctx context.Context, args []string, stdout, stderr io.Writer, a
 		return 0
 	}
 	return 1
+}
+func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
+	flags := flag.NewFlagSet("slick build", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "write versioned JSON")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() > 1 {
+		if err == nil {
+			fmt.Fprintln(stderr, "usage: slick build [--json] [path]")
+		}
+		return 2
+	}
+	path := "."
+	if flags.NArg() == 1 {
+		path = flags.Arg(0)
+	}
+	config, err := findConfig(path)
+	if err != nil {
+		doc := Document{
+			Version:     documentVersion,
+			Command:     "build",
+			Diagnostics: []Diagnostic{},
+			Error:       &Failure{Kind: "missing_configuration", Message: err.Error()},
+		}
+		writeDocument(stdout, stderr, doc, *jsonOutput)
+		return 1
+	}
+	projectRoot := filepath.Dir(config)
+	stage, err := os.MkdirTemp(projectRoot, ".slick-build-")
+	if err != nil {
+		doc := Document{
+			Version:     documentVersion,
+			Command:     "build",
+			Project:     "tsconfig.json",
+			Diagnostics: []Diagnostic{},
+			Error:       &Failure{Kind: "emit_failure", Message: err.Error()},
+		}
+		writeDocument(stdout, stderr, doc, *jsonOutput)
+		return 1
+	}
+	defer os.RemoveAll(stage)
+
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config, EmitRoot: stage})
+	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
+		return 130
+	}
+	doc := Document{
+		Version:     documentVersion,
+		Command:     "build",
+		Project:     "tsconfig.json",
+		Diagnostics: analysis.Diagnostics,
+		Error:       analysis.Failure,
+	}
+	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+		if err := installOutputs(ctx, stage, analysis.Outputs); err != nil {
+			doc.Error = &Failure{Kind: "emit_failure", Message: err.Error()}
+		} else {
+			doc.Success = true
+			doc.Outputs = displayOutputPaths(projectRoot, analysis.Outputs)
+		}
+	}
+	writeDocument(stdout, stderr, doc, *jsonOutput)
+	if doc.Success {
+		return 0
+	}
+	return 1
+}
+
+type installedOutput struct {
+	final  string
+	backup string
+}
+
+func installOutputs(ctx context.Context, stage string, outputs []BuildOutput) error {
+	ordered := append([]BuildOutput(nil), outputs...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	installed := make([]installedOutput, 0, len(ordered))
+	createdDirectories := []string{}
+	seen := map[string]struct{}{}
+	rollback := func() {
+		for index := len(installed) - 1; index >= 0; index-- {
+			output := installed[index]
+			_ = os.RemoveAll(output.final)
+			if output.backup != "" {
+				_ = os.Rename(output.backup, output.final)
+			}
+		}
+		for index := len(createdDirectories) - 1; index >= 0; index-- {
+			_ = os.Remove(createdDirectories[index])
+		}
+	}
+
+	for _, output := range ordered {
+		if err := ctx.Err(); err != nil {
+			rollback()
+			return err
+		}
+		if !filepath.IsAbs(output.Path) {
+			rollback()
+			return fmt.Errorf("emit returned non-absolute output path %q", output.Path)
+		}
+		final := filepath.Clean(output.Path)
+		if _, duplicate := seen[final]; duplicate {
+			rollback()
+			return fmt.Errorf("emit returned duplicate output path %q", final)
+		}
+		seen[final] = struct{}{}
+		staged := filepath.Join(stage, filepath.FromSlash(output.Staged))
+		relative, err := filepath.Rel(stage, staged)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			rollback()
+			return fmt.Errorf("emit returned invalid staged path %q", output.Staged)
+		}
+		parent := filepath.Dir(final)
+		missing := missingDirectories(parent)
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			rollback()
+			return fmt.Errorf("create output directory: %w", err)
+		}
+		createdDirectories = append(createdDirectories, missing...)
+
+		source, err := os.Open(staged)
+		if err != nil {
+			rollback()
+			return fmt.Errorf("open staged output: %w", err)
+		}
+		temporary, err := os.CreateTemp(parent, ".slick-output-*")
+		if err != nil {
+			source.Close()
+			rollback()
+			return fmt.Errorf("create output file: %w", err)
+		}
+		temporaryName := temporary.Name()
+		_, copyErr := io.Copy(temporary, source)
+		closeErr := temporary.Close()
+		source.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(temporaryName)
+			rollback()
+			if copyErr != nil {
+				return fmt.Errorf("copy output: %w", copyErr)
+			}
+			return fmt.Errorf("close output: %w", closeErr)
+		}
+		_ = os.Chmod(temporaryName, 0o644)
+
+		backup := ""
+		if info, err := os.Stat(final); err == nil {
+			if info.IsDir() {
+				_ = os.Remove(temporaryName)
+				rollback()
+				return fmt.Errorf("output path %q is a directory", final)
+			}
+			reservation, err := os.CreateTemp(parent, ".slick-backup-*")
+			if err != nil {
+				_ = os.Remove(temporaryName)
+				rollback()
+				return fmt.Errorf("reserve output backup: %w", err)
+			}
+			backup = reservation.Name()
+			reservation.Close()
+			_ = os.Remove(backup)
+			if err := os.Rename(final, backup); err != nil {
+				_ = os.Remove(temporaryName)
+				rollback()
+				return fmt.Errorf("back up output: %w", err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			_ = os.Remove(temporaryName)
+			rollback()
+			return fmt.Errorf("inspect output: %w", err)
+		}
+		if err := os.Rename(temporaryName, final); err != nil {
+			if backup != "" {
+				_ = os.Rename(backup, final)
+			}
+			rollback()
+			return fmt.Errorf("install output: %w", err)
+		}
+		installed = append(installed, installedOutput{final: final, backup: backup})
+	}
+	for _, output := range installed {
+		if output.backup != "" {
+			_ = os.Remove(output.backup)
+		}
+	}
+	return nil
+}
+
+func missingDirectories(path string) []string {
+	missing := []string{}
+	for current := path; ; current = filepath.Dir(current) {
+		if _, err := os.Stat(current); err == nil {
+			break
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	sort.Slice(missing, func(i, j int) bool { return len(missing[i]) < len(missing[j]) })
+	return missing
+}
+
+func displayOutputPaths(projectRoot string, outputs []BuildOutput) []string {
+	paths := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		value, err := filepath.Rel(projectRoot, output.Path)
+		if err != nil {
+			value = output.Path
+		}
+		paths = append(paths, filepath.ToSlash(value))
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func findConfig(path string) (string, error) {
@@ -217,6 +436,9 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 	}
 	if doc.Contract != nil {
 		writeContract(stdout, *doc.Contract)
+	}
+	for _, output := range doc.Outputs {
+		fmt.Fprintln(stdout, "emitted:", output)
 	}
 	if doc.Error != nil {
 		fmt.Fprintf(stderr, "slick: %s: %s\n", doc.Error.Kind, doc.Error.Message)
