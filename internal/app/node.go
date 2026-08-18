@@ -13,6 +13,15 @@ import (
 //go:embed analyzer.mjs
 var analyzerSource string
 
+//go:embed operational.mjs
+var operationalSource string
+
+type analyzerResponse struct {
+	Diagnostics []Diagnostic      `json:"diagnostics"`
+	Graph       []operationalNode `json:"graph"`
+	Failure     *Failure          `json:"failure,omitempty"`
+}
+
 type NodeAnalyzer struct{}
 
 func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
@@ -21,7 +30,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		return failed("missing_toolchain", "Node.js was not found in PATH")
 	}
 
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", analyzerSource)
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", analyzerSource+"\n"+operationalSource)
 	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+config)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -37,18 +46,26 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		return failed("analyzer_failure", message)
 	}
 
-	var result Analysis
+	var response analyzerResponse
 	decoder := json.NewDecoder(&stdout)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
+	if err := decoder.Decode(&response); err != nil {
 		return failed("analyzer_failure", "invalid analyzer response: "+err.Error())
 	}
-	if result.Diagnostics == nil {
-		result.Diagnostics = []Diagnostic{}
+	if response.Diagnostics == nil {
+		response.Diagnostics = []Diagnostic{}
 	}
-	return result
+	return Analysis{
+		Diagnostics: response.Diagnostics,
+		Summaries:   summarize(response.Graph),
+		Failure:     response.Failure,
+	}
 }
 
 func failed(kind, message string) Analysis {
-	return Analysis{Diagnostics: []Diagnostic{}, Failure: &Failure{Kind: kind, Message: message}}
+	return Analysis{
+		Diagnostics: []Diagnostic{},
+		Summaries:   []OperationalSummary{},
+		Failure:     &Failure{Kind: kind, Message: message},
+	}
 }
