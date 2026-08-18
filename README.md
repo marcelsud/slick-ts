@@ -4,9 +4,9 @@ Slick is a Go command-line interface for normal TypeScript projects. The
 TypeScript Compiler API is the source of truth. TypeScript owns parsing,
 module resolution, and type checking.
 
-Slick is also the foundation for machine-readable operational contracts.
-These contracts will describe errors, authority use, and asynchronous
-ownership without custom TypeScript syntax or a new runtime.
+Slick exposes machine-readable operational contracts for errors, authority
+use, asynchronous ownership, and unresolved dependencies without custom
+TypeScript syntax or a new runtime.
 
 ## Status
 
@@ -160,6 +160,13 @@ Emit is staged before installation. A TypeScript error, Slick error, interrupt,
 emit failure, or output-install failure leaves pre-existing outputs unchanged.
 Successful JSON output lists installed files relative to the project.
 
+## Development loop
+
+1. Inspect a symbol with `slick describe --json`.
+2. Write ordinary TypeScript and npm imports.
+3. Run `slick check --json` and apply its concrete repairs.
+4. Inspect any exact unresolved package leaf.
+5. Run `slick build`, then execute the emitted JavaScript normally.
 
 ## Failures and exit status
 

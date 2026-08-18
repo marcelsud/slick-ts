@@ -1,0 +1,11 @@
+{
+  "name": "fixture-dependency",
+  "version": "1.2.3",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  }
+}
