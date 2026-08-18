@@ -16,9 +16,13 @@ var analyzerSource string
 //go:embed operational.mjs
 var operationalSource string
 
+//go:embed packages.mjs
+var packagesSource string
+
 type analyzerResponse struct {
 	Diagnostics []Diagnostic      `json:"diagnostics"`
 	Graph       []operationalNode `json:"graph"`
+	Cache       CacheStats        `json:"cache"`
 	Failure     *Failure          `json:"failure,omitempty"`
 }
 
@@ -30,7 +34,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 		return failed("missing_toolchain", "Node.js was not found in PATH")
 	}
 
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", analyzerSource+"\n"+operationalSource)
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+analyzerSource)
 	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+config)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -58,6 +62,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, config string) Analysis {
 	return Analysis{
 		Diagnostics: response.Diagnostics,
 		Summaries:   summarize(response.Graph),
+		Cache:       response.Cache,
 		Failure:     response.Failure,
 	}
 }

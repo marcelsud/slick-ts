@@ -1,13 +1,31 @@
-function analyzeOperational(program, projectRoot, ts) {
+function analyzeOperational(program, projectRoot, ts, packages = []) {
   const checker = program.getTypeChecker();
   const records = [];
   const byDeclaration = new Map();
   const bySymbol = new Map();
   const identifiers = new Set();
+  const packageBySource = new Map();
+  for (const dependency of packages) {
+    for (const fileName of dependency.sources ?? []) {
+      packageBySource.set(path.resolve(fileName), dependency);
+    }
+  }
+
 
   function stableSourcePath(fileName) {
     return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
   }
+  function packageForSymbol(symbol) {
+    const files = (symbol?.declarations ?? []).map((declaration) => path.resolve(declaration.getSourceFile().fileName));
+    return packages.find((dependency) =>
+      files.some((fileName) =>
+        fileName === dependency.declarationFile ||
+        fileName === dependency.implementationFile ||
+        fileName.startsWith(dependency.packageRoot + path.sep),
+      ),
+    );
+  }
+
 
   function sourceRange(node) {
     const sourceFile = node.getSourceFile();
@@ -155,6 +173,7 @@ function analyzeOperational(program, projectRoot, ts) {
             path: stableSourcePath(node.getSourceFile().fileName),
             range: sourceRange(namedNode),
           },
+          package: packageBySource.get(path.resolve(node.getSourceFile().fileName))?.identity,
           errors: [],
           effects: [],
           unresolved: [],
@@ -488,12 +507,28 @@ function analyzeOperational(program, projectRoot, ts) {
   function unresolvedCall(call, record) {
     const symbol = symbolAtCall(call);
     const declarations = symbol?.declarations ?? [];
-    const reason = declarations.length > 0 && declarations.every(isDeclarationOnly)
-      ? "declaration_only"
-      : "unmodeled_call";
+    const dependency = packageForSymbol(symbol);
+    let reason;
+    if (call.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      reason = "dynamic_import_target";
+    } else if (ts.isIdentifier(call.expression) && call.expression.text === "eval") {
+      reason = "dynamic_code";
+    } else if (ts.isIdentifier(call.expression) && call.expression.text === "Function") {
+      reason = "generated_function";
+    } else if (ts.isPropertyAccessExpression(call.expression) && call.expression.expression.getText() === "Reflect") {
+      reason = "reflection";
+    } else {
+      reason = dependency?.reason ?? (
+        declarations.length > 0 && declarations.every(isDeclarationOnly)
+          ? "declaration_only"
+          : "unmodeled_call"
+      );
+    }
     return {
       symbol: call.expression.getText(call.getSourceFile()),
       reason,
+      dimensions: ["errors", "effects", "execution"],
+      ...(dependency && { package: dependency.identity }),
       provenance: provenance(record, call),
     };
   }
@@ -621,19 +656,103 @@ function analyzeOperational(program, projectRoot, ts) {
   }
 
   for (const sourceFile of program.getSourceFiles()) {
-    const relative = path.relative(projectRoot, path.resolve(sourceFile.fileName));
-    if (
+    const absolute = path.resolve(sourceFile.fileName);
+    const relative = path.relative(projectRoot, absolute);
+    const authored = (
       !sourceFile.isDeclarationFile &&
       relative !== "" &&
       relative !== ".." &&
       !relative.startsWith(`..${path.sep}`) &&
       !relative.split(path.sep).includes("node_modules")
-    ) {
-      discover(sourceFile);
+    );
+    if (authored || packageBySource.has(absolute)) discover(sourceFile);
+  }
+
+  function exportsOf(fileName) {
+    const sourceFile = fileName && (
+      program.getSourceFile(fileName) ??
+      program.getSourceFiles().find((candidate) => path.resolve(candidate.fileName) === path.resolve(fileName))
+    );
+    const symbol = sourceFile?.symbol;
+    return symbol ? new Map(checker.getExportsOfModule(symbol).map((value) => [value.name, value])) : new Map();
+  }
+
+  for (const dependency of packages) {
+    if (!dependency.declarationFile || !dependency.implementationFile) continue;
+    const declarations = exportsOf(dependency.declarationFile);
+    const implementations = exportsOf(dependency.implementationFile);
+    for (const [name, declaration] of declarations) {
+      const implementation = implementations.get(name);
+      if (!implementation) continue;
+      const resolvedImplementation = resolveAlias(implementation);
+      const target = bySymbol.get(resolvedImplementation) ??
+        (resolvedImplementation.declarations ?? []).map((value) => byDeclaration.get(value)).find(Boolean);
+      if (!target) continue;
+      target.package = dependency.identity;
+      bySymbol.set(resolveAlias(declaration), target);
     }
   }
+
+  const cache = { hits: 0, misses: 0 };
+  const cached = new Set();
+  const cacheDirectory = process.env.SLICK_CACHE_DIR || path.join(projectRoot, "node_modules", ".cache", "slick");
+  const groups = new Map();
   for (const record of records) {
-    analyze(record);
+    if (!record.package) continue;
+    const dependency = packages.find((value) => value.identity === record.package);
+    if (!dependency?.implementationFile) continue;
+    const group = groups.get(dependency.cacheKey) ?? { dependency, records: [] };
+    group.records.push(record);
+    groups.set(dependency.cacheKey, group);
   }
-  return records.map(({ node: _node, ...record }) => record);
+
+  if (groups.size > 0) fs.mkdirSync(cacheDirectory, { recursive: true });
+  for (const [cacheKey, group] of groups) {
+    const cachePath = path.join(cacheDirectory, `${crypto.createHash("sha256").update(cacheKey).digest("hex")}.json`);
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    } catch {}
+    const byCachedSymbol = new Map((value?.records ?? []).map((record) => [record.symbol, record]));
+    if (
+      value?.version === analysisSchemaVersion &&
+      value?.key === cacheKey &&
+      group.records.every((record) => byCachedSymbol.has(record.symbol))
+    ) {
+      for (const record of group.records) {
+        const stored = byCachedSymbol.get(record.symbol);
+        record.errors = stored.errors;
+        record.effects = stored.effects;
+        record.unresolved = stored.unresolved;
+        record.calls = stored.calls;
+        cached.add(record);
+      }
+      cache.hits++;
+      continue;
+    }
+    group.cachePath = cachePath;
+    cache.misses++;
+  }
+
+  for (const record of records) {
+    if (!cached.has(record)) analyze(record);
+  }
+  for (const [cacheKey, group] of groups) {
+    if (!group.cachePath) continue;
+    const value = {
+      version: analysisSchemaVersion,
+      key: cacheKey,
+      records: group.records.map(({ symbol, errors, effects, unresolved, calls }) => ({
+        symbol,
+        errors,
+        effects,
+        unresolved,
+        calls,
+      })),
+    };
+    const temporary = `${group.cachePath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(value));
+    fs.renameSync(temporary, group.cachePath);
+  }
+  return { graph: records.map(({ node: _node, ...record }) => record), cache };
 }

@@ -26,10 +26,15 @@ type Failure struct {
 	Kind    string `json:"kind"`
 	Message string `json:"message"`
 }
+type CacheStats struct {
+	Hits   int `json:"hits"`
+	Misses int `json:"misses"`
+}
 
 type Analysis struct {
 	Diagnostics []Diagnostic         `json:"diagnostics"`
 	Summaries   []OperationalSummary `json:"summaries"`
+	Cache       CacheStats           `json:"cache"`
 	Failure     *Failure             `json:"failure,omitempty"`
 }
 

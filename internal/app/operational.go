@@ -16,6 +16,15 @@ type SourceLocation struct {
 	Path  string `json:"path"`
 	Range Range  `json:"range"`
 }
+type PackageIdentity struct {
+	Name           string   `json:"name"`
+	Version        string   `json:"version"`
+	Export         string   `json:"export"`
+	Integrity      string   `json:"integrity"`
+	Conditions     []string `json:"conditions"`
+	Declaration    string   `json:"declaration,omitempty"`
+	Implementation string   `json:"implementation,omitempty"`
+}
 
 type Provenance struct {
 	Symbol string `json:"symbol"`
@@ -31,15 +40,18 @@ type OperationalFact struct {
 }
 
 type UnresolvedLeaf struct {
-	Symbol     string       `json:"symbol"`
-	Reason     string       `json:"reason"`
-	Provenance []Provenance `json:"provenance"`
+	Symbol     string           `json:"symbol"`
+	Reason     string           `json:"reason"`
+	Dimensions []string         `json:"dimensions,omitempty"`
+	Package    *PackageIdentity `json:"package,omitempty"`
+	Provenance []Provenance     `json:"provenance"`
 }
 
 type OperationalSummary struct {
 	Symbol     string            `json:"symbol"`
 	Execution  Execution         `json:"execution"`
 	Location   SourceLocation    `json:"location"`
+	Package    *PackageIdentity  `json:"package,omitempty"`
 	Errors     []OperationalFact `json:"errors"`
 	Effects    []OperationalFact `json:"effects"`
 	Unresolved []UnresolvedLeaf  `json:"unresolved"`
@@ -68,6 +80,7 @@ type operationalNode struct {
 	Execution     Execution         `json:"execution"`
 	AsyncBoundary bool              `json:"asyncBoundary,omitempty"`
 	Location      SourceLocation    `json:"location"`
+	Package       *PackageIdentity  `json:"package,omitempty"`
 	Errors        []directError     `json:"errors"`
 	Effects       []OperationalFact `json:"effects"`
 	Unresolved    []UnresolvedLeaf  `json:"unresolved"`
@@ -165,6 +178,7 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 			Symbol:     node.Symbol,
 			Execution:  node.Execution,
 			Location:   node.Location,
+			Package:    node.Package,
 			Errors:     errorFacts(summary.errors),
 			Effects:    facts(summary.effects),
 			Unresolved: unresolved(summary.unresolved),
@@ -276,12 +290,17 @@ func mergeFact(set factSet, fact OperationalFact) bool {
 
 func mergeUnresolved(set unresolvedSet, leaf UnresolvedLeaf) bool {
 	key := leaf.Symbol + "\x00" + leaf.Reason
+	if leaf.Package != nil {
+		key += "\x00" + leaf.Package.Name + "\x00" + leaf.Package.Version + "\x00" + leaf.Package.Export
+	}
 	entry, ok := set[key]
 	if !ok {
+		copied := leaf
+		copied.Provenance = nil
 		entry = struct {
 			leaf       UnresolvedLeaf
 			provenance map[string]Provenance
-		}{leaf: UnresolvedLeaf{Symbol: leaf.Symbol, Reason: leaf.Reason}, provenance: map[string]Provenance{}}
+		}{leaf: copied, provenance: map[string]Provenance{}}
 	}
 	changed := !ok
 	for _, source := range leaf.Provenance {
