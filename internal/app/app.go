@@ -174,7 +174,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer, anal
 		return 1
 	}
 	projectRoot := filepath.Dir(config)
-	stage, err := os.MkdirTemp(projectRoot, ".slick-build-")
+	stage, err := os.MkdirTemp("", "slick-build-*")
 	if err != nil {
 		doc := Document{
 			Version:     documentVersion,
@@ -201,6 +201,9 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer, anal
 	}
 	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
 		if err := installOutputs(ctx, stage, analysis.Outputs); err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return 130
+			}
 			doc.Error = &Failure{Kind: "emit_failure", Message: err.Error()}
 		} else {
 			doc.Success = true
@@ -267,6 +270,11 @@ func installOutputs(ctx context.Context, stage string, outputs []BuildOutput) er
 		}
 		createdDirectories = append(createdDirectories, missing...)
 
+		stagedInfo, err := os.Stat(staged)
+		if err != nil {
+			rollback()
+			return fmt.Errorf("inspect staged output: %w", err)
+		}
 		source, err := os.Open(staged)
 		if err != nil {
 			rollback()
@@ -290,15 +298,38 @@ func installOutputs(ctx context.Context, stage string, outputs []BuildOutput) er
 			}
 			return fmt.Errorf("close output: %w", closeErr)
 		}
-		_ = os.Chmod(temporaryName, 0o644)
+		if err := ctx.Err(); err != nil {
+			_ = os.Remove(temporaryName)
+			rollback()
+			return err
+		}
 
-		backup := ""
-		if info, err := os.Stat(final); err == nil {
-			if info.IsDir() {
+		mode := stagedInfo.Mode().Perm()
+		existing, statErr := os.Lstat(final)
+		if statErr == nil {
+			if existing.IsDir() {
 				_ = os.Remove(temporaryName)
 				rollback()
 				return fmt.Errorf("output path %q is a directory", final)
 			}
+			if existing.Mode().IsRegular() {
+				mode = existing.Mode().Perm()
+			} else if target, err := os.Stat(final); err == nil && target.Mode().IsRegular() {
+				mode = target.Mode().Perm()
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			_ = os.Remove(temporaryName)
+			rollback()
+			return fmt.Errorf("inspect output: %w", statErr)
+		}
+		if err := os.Chmod(temporaryName, mode); err != nil {
+			_ = os.Remove(temporaryName)
+			rollback()
+			return fmt.Errorf("set output mode: %w", err)
+		}
+
+		backup := ""
+		if statErr == nil {
 			reservation, err := os.CreateTemp(parent, ".slick-backup-*")
 			if err != nil {
 				_ = os.Remove(temporaryName)
@@ -313,10 +344,14 @@ func installOutputs(ctx context.Context, stage string, outputs []BuildOutput) er
 				rollback()
 				return fmt.Errorf("back up output: %w", err)
 			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+		}
+		if err := ctx.Err(); err != nil {
 			_ = os.Remove(temporaryName)
+			if backup != "" {
+				_ = os.Rename(backup, final)
+			}
 			rollback()
-			return fmt.Errorf("inspect output: %w", err)
+			return err
 		}
 		if err := os.Rename(temporaryName, final); err != nil {
 			if backup != "" {
@@ -326,6 +361,14 @@ func installOutputs(ctx context.Context, stage string, outputs []BuildOutput) er
 			return fmt.Errorf("install output: %w", err)
 		}
 		installed = append(installed, installedOutput{final: final, backup: backup})
+		if err := ctx.Err(); err != nil {
+			rollback()
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		rollback()
+		return err
 	}
 	for _, output := range installed {
 		if output.backup != "" {

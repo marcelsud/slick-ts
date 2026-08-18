@@ -63,6 +63,27 @@ async function caller(): Promise<void> {
 		t.Fatalf("unexpected caller summary: %+v", caller)
 	}
 }
+func TestNodeAnalyzerIgnoresInheritedEmitRoot(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "tsconfig.json"), `{"compilerOptions":{"strict":true},"files":["main.ts"]}`)
+	writeTestFile(t, filepath.Join(root, "main.ts"), `export const answer: number = 42;`)
+	compiler, err := filepath.Abs(filepath.Join("..", "..", "node_modules", "typescript", "lib", "typescript.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
+	emitRoot := t.TempDir()
+	t.Setenv("SLICK_EMIT_ROOT", emitRoot)
+
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
+	if result.Failure != nil || len(result.Outputs) != 0 {
+		t.Fatalf("check inherited emit state: %+v", result)
+	}
+	entries, err := os.ReadDir(emitRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("non-build analysis emitted files: entries=%v err=%v", entries, err)
+	}
+}
 
 func writeTestFile(t *testing.T, name, content string) {
 	t.Helper()

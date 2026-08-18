@@ -80,6 +80,31 @@ console.log(greeting("slick"));
 		}
 	}
 }
+func TestBuildSupportsReadOnlySourceRootWithExternalOutput(t *testing.T) {
+	outputRoot := t.TempDir()
+	config := strings.Replace(
+		buildConfig,
+		`"outDir": "dist"`,
+		`"outDir": "`+filepath.ToSlash(outputRoot)+`"`,
+		1,
+	)
+	root := project(t, config, map[string]string{
+		"package.json": `{"type":"module"}`,
+		"src/main.ts":  `export const answer: number = 42;`,
+	})
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(root, 0o755)
+
+	output, stderr, code := runSlick(t, root, nil, "build", "--json")
+	if code != 0 || stderr != "" || !decodeBuild(t, output).Success {
+		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
+	}
+	if _, err := os.Stat(filepath.Join(outputRoot, "main.js")); err != nil {
+		t.Fatalf("external output missing: %v", err)
+	}
+}
 
 func TestBuildErrorsLeaveExistingOutputUnchanged(t *testing.T) {
 	tests := []struct {

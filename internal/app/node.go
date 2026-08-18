@@ -46,7 +46,13 @@ func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysi
 	}
 
 	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+buildSource+"\n"+analyzerSource)
-	cmd.Env = append(os.Environ(), "SLICK_CONFIG_PATH="+request.Config)
+	cmd.Env = make([]string, 0, len(os.Environ())+2)
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "SLICK_CONFIG_PATH=") && !strings.HasPrefix(variable, "SLICK_EMIT_ROOT=") {
+			cmd.Env = append(cmd.Env, variable)
+		}
+	}
+	cmd.Env = append(cmd.Env, "SLICK_CONFIG_PATH="+request.Config)
 	if request.EmitRoot != "" {
 		cmd.Env = append(cmd.Env, "SLICK_EMIT_ROOT="+request.EmitRoot)
 	}
