@@ -218,7 +218,7 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
   }
 
   const consumedSymbols = new Map();
-  function collectPromiseValues(node) {
+  function collectDirectPromiseValue(node) {
     while (
       ts.isParenthesizedExpression(node) ||
       ts.isAsExpression(node) ||
@@ -227,31 +227,40 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
     ) {
       node = node.expression;
     }
-    if (ts.isIdentifier(node)) {
-      const symbol = symbolOf(node);
-      if (symbol) {
-        const uses = consumedSymbols.get(symbol) ?? [];
-        uses.push(node);
-        consumedSymbols.set(symbol, uses);
-      }
-    } else if (ts.isArrayLiteralExpression(node)) {
-      for (const element of node.elements) collectPromiseValues(ts.isSpreadElement(element) ? element.expression : element);
+    if (!ts.isIdentifier(node)) return;
+    const symbol = symbolOf(node);
+    if (symbol) {
+      const uses = consumedSymbols.get(symbol) ?? [];
+      uses.push(node);
+      consumedSymbols.set(symbol, uses);
     }
+  }
+
+  function collectCombinatorValues(node) {
+    if (ts.isArrayLiteralExpression(node)) {
+      for (const element of node.elements) {
+        collectCombinatorValues(ts.isSpreadElement(element) ? element.expression : element);
+      }
+      return;
+    }
+    collectDirectPromiseValue(node);
   }
 
   function discoverConsumption(node) {
     if (ts.isAwaitExpression(node)) {
-      collectPromiseValues(node.expression);
+      collectDirectPromiseValue(node.expression);
     } else if (ts.isReturnStatement(node) && node.expression && !enclosingCallbackReturnIgnored(node)) {
-      collectPromiseValues(node.expression);
-    } else if (ts.isCallExpression(node) && (isPromiseCombinator(node) || isOwnershipTransfer(node))) {
-      for (const argument of node.arguments) collectPromiseValues(argument);
+      collectDirectPromiseValue(node.expression);
+    } else if (ts.isCallExpression(node) && isPromiseCombinator(node)) {
+      for (const argument of node.arguments) collectCombinatorValues(argument);
+    } else if (ts.isCallExpression(node) && isOwnershipTransfer(node)) {
+      for (const argument of node.arguments) collectDirectPromiseValue(argument);
     } else if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
       ["then", "catch", "finally"].includes(node.expression.name.text)
     ) {
-      collectPromiseValues(node.expression.expression);
+      collectDirectPromiseValue(node.expression.expression);
     }
     ts.forEachChild(node, discoverConsumption);
   }
@@ -286,6 +295,38 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
     }
     return result;
   }
+  function branchChoices(node) {
+    const choices = new Map();
+    let child = node;
+    let current = node.parent;
+    while (current) {
+      if (ts.isIfStatement(current) && (child === current.thenStatement || child === current.elseStatement)) {
+        choices.set(current, child);
+      } else if (
+        ts.isConditionalExpression(current) &&
+        (child === current.whenTrue || child === current.whenFalse)
+      ) {
+        choices.set(current, child);
+      } else if ((ts.isCaseClause(current) || ts.isDefaultClause(current)) && ts.isSwitchStatement(current.parent.parent)) {
+        choices.set(current.parent.parent, current);
+      }
+      if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) ||
+          ts.isArrowFunction(current) || ts.isFunctionExpression(current)) break;
+      child = current;
+      current = current.parent;
+    }
+    return choices;
+  }
+
+  function mutuallyExclusive(left, right) {
+    const leftChoices = branchChoices(left);
+    const rightChoices = branchChoices(right);
+    for (const [branch, choice] of leftChoices) {
+      if (rightChoices.has(branch) && rightChoices.get(branch) !== choice) return true;
+    }
+    return false;
+  }
+
 
   function assignedPromiseConsumed(expression, symbol) {
     const start = expression.getStart();
@@ -299,9 +340,7 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
             symbolOf(node.left) === symbol)
         ) {
           const position = node.getStart();
-          const conditions = conditionalAncestors(node);
-          const definitelyOverwrites = [...conditions].every((condition) => creationConditions.has(condition));
-          if (position > start && definitelyOverwrites) {
+          if (position > start && !mutuallyExclusive(expression, node)) {
             nextAssignment = Math.min(nextAssignment, position);
           }
         }
@@ -337,12 +376,19 @@ function analyzeStrict(program, projectRoot, ts, typeScriptDiagnostics) {
         ts.isCallExpression(parent.parent) && parent.parent.expression === parent &&
         ["then", "catch", "finally"].includes(parent.name.text)
       ) return true;
+      if (ts.isArrayLiteralExpression(parent)) {
+        const call = parent.parent;
+        if (ts.isCallExpression(call) && call.arguments.includes(parent) && isPromiseCombinator(call)) {
+          current = parent;
+          continue;
+        }
+        return false;
+      }
       if (
         ts.isParenthesizedExpression(parent) ||
         ts.isAsExpression(parent) ||
         ts.isTypeAssertionExpression(parent) ||
-        ts.isNonNullExpression(parent) ||
-        ts.isArrayLiteralExpression(parent)
+        ts.isNonNullExpression(parent)
       ) {
         current = parent;
         continue;

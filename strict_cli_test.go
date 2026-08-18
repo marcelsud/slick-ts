@@ -132,6 +132,9 @@ export async function rejected(flag: boolean) {
 	await overwritten;
 	const conditional = fetch("https://example.test/eight");
 	if (flag) await conditional;
+	let conditionallyOverwritten = fetch("https://example.test/nine");
+	if (flag) conditionallyOverwritten = fetch("https://example.test/ten");
+	await conditionallyOverwritten;
 	return pending;
 }
 `,
@@ -142,7 +145,7 @@ export async function rejected(flag: boolean) {
 		t.Fatalf("exit %d, output %+v", code, document)
 	}
 	codes := slickCodes(document.Diagnostics)
-	if len(codes) != 6 {
+	if len(codes) != 7 {
 		t.Fatalf("Promise diagnostics %v, output %+v", codes, document)
 	}
 	for _, got := range codes {
@@ -161,13 +164,15 @@ export async function rejected(items: number[]) {
 	const pending = fetch("https://example.test/unowned");
 	await ignore(pending);
 	items.map(async () => { await work(); });
+	const arrayPending = fetch("https://example.test/array");
+	await [arrayPending];
 }
 `,
 	})
 	output, _, code := runSlick(t, rejected, nil, "check", "--json")
 	document := decodeOutput(t, output)
 	codes := slickCodes(document.Diagnostics)
-	if code != 1 || len(codes) != 2 || codes[0] != 1004 || codes[1] != 1004 {
+	if code != 1 || len(codes) != 3 || codes[0] != 1004 || codes[1] != 1004 || codes[2] != 1004 {
 		t.Fatalf("exit %d, Promise diagnostics %v, output %+v", code, codes, document)
 	}
 
