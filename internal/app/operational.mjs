@@ -53,6 +53,41 @@ function analyzeOperational(program, projectRoot, ts) {
     return undefined;
   }
 
+  function compactText(node) {
+    return node?.getText(node.getSourceFile()).replace(/\s+/g, " ") ?? "";
+  }
+
+  function scopeOrdinal(scope) {
+    let ordinal = 0;
+    let found = 0;
+    scope.parent?.forEachChild((child) => {
+      if (child === scope) {
+        found = ordinal;
+      }
+      if (child.kind === scope.kind) {
+        ordinal++;
+      }
+    });
+    return found;
+  }
+
+  function scopeName(scope) {
+    if (ts.isCaseClause(scope)) return `case:${compactText(scope.expression)}`;
+    if (ts.isDefaultClause(scope)) return "case:default";
+    const parent = scope.parent;
+    if (ts.isIfStatement(parent)) {
+      return `if:${compactText(parent.expression)}:${parent.thenStatement === scope ? "then" : "else"}`;
+    }
+    if (ts.isTryStatement(parent)) {
+      return parent.tryBlock === scope ? "try" : "finally";
+    }
+    if (ts.isCatchClause(parent)) return "catch";
+    if (ts.isForStatement(parent) || ts.isForInStatement(parent) || ts.isForOfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) {
+      return `${ts.SyntaxKind[parent.kind]}:${scopeOrdinal(scope)}`;
+    }
+    return `${ts.SyntaxKind[parent?.kind] ?? "scope"}:${scopeOrdinal(scope)}`;
+  }
+
   function lexicalName(node, ownName) {
     const parts = [ownName];
     let current = node.parent;
@@ -65,7 +100,7 @@ function analyzeOperational(program, projectRoot, ts) {
       } else if (ts.isModuleDeclaration(current)) {
         parts.unshift(current.name.getText(current.getSourceFile()));
       } else if (
-        ts.isVariableDeclaration(current) &&
+        (ts.isVariableDeclaration(current) || ts.isPropertyDeclaration(current) || ts.isPropertyAssignment(current)) &&
         current.name &&
         current.initializer &&
         (ts.isObjectLiteralExpression(current.initializer) || ts.isClassExpression(current.initializer))
@@ -76,7 +111,7 @@ function analyzeOperational(program, projectRoot, ts) {
         ts.isCaseClause(current) ||
         ts.isDefaultClause(current)
       ) {
-        parts.unshift(`scope@${current.getStart(current.getSourceFile())}`);
+        parts.unshift(scopeName(current));
       }
       current = current.parent;
     }
@@ -115,6 +150,7 @@ function analyzeOperational(program, projectRoot, ts) {
           node,
           symbol,
           execution: executionFor(node),
+          asyncBoundary: hasAsyncModifier(node),
           location: {
             path: stableSourcePath(node.getSourceFile().fileName),
             range: sourceRange(namedNode),
@@ -135,8 +171,12 @@ function analyzeOperational(program, projectRoot, ts) {
     ts.forEachChild(node, discover);
   }
 
+  function hasAsyncModifier(node) {
+    return node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+  }
+
   function executionFor(node) {
-    if (node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)) {
+    if (hasAsyncModifier(node)) {
       return "asynchronous";
     }
     const signature = checker.getSignatureFromDeclaration(node);
@@ -496,7 +536,10 @@ function analyzeOperational(program, projectRoot, ts) {
     if (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
       write = true;
       read = parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken;
-    } else if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
+    } else if (
+      ts.isPostfixUnaryExpression(parent) ||
+      (ts.isPrefixUnaryExpression(parent) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(parent.operator))
+    ) {
       read = true;
       write = true;
     }
@@ -522,6 +565,7 @@ function analyzeOperational(program, projectRoot, ts) {
             name: error.name,
             type: error.type,
             supertypes: error.supertypes,
+            timing: record.asyncBoundary ? "asynchronous" : "synchronous",
             provenance: provenance(record, node),
             policies: policiesFor(node, record),
           });

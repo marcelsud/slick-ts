@@ -26,6 +26,7 @@ type Provenance struct {
 type OperationalFact struct {
 	Name       string       `json:"name"`
 	Type       string       `json:"type,omitempty"`
+	Timing     Execution    `json:"timing,omitempty"`
 	Provenance []Provenance `json:"provenance"`
 }
 
@@ -63,13 +64,14 @@ type callEdge struct {
 }
 
 type operationalNode struct {
-	Symbol     string            `json:"symbol"`
-	Execution  Execution         `json:"execution"`
-	Location   SourceLocation    `json:"location"`
-	Errors     []directError     `json:"errors"`
-	Effects    []OperationalFact `json:"effects"`
-	Unresolved []UnresolvedLeaf  `json:"unresolved"`
-	Calls      []callEdge        `json:"calls"`
+	Symbol        string            `json:"symbol"`
+	Execution     Execution         `json:"execution"`
+	AsyncBoundary bool              `json:"asyncBoundary,omitempty"`
+	Location      SourceLocation    `json:"location"`
+	Errors        []directError     `json:"errors"`
+	Effects       []OperationalFact `json:"effects"`
+	Unresolved    []UnresolvedLeaf  `json:"unresolved"`
+	Calls         []callEdge        `json:"calls"`
 }
 
 type factSet map[string]map[string]Provenance
@@ -107,7 +109,7 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 			unresolved: unresolvedSet{},
 		}
 		for _, fact := range node.Errors {
-			if allowsError(errorIdentity(fact.OperationalFact), fact.Supertypes, fact.Policies) {
+			if allowsError(errorType(fact.OperationalFact), fact.Supertypes, fact.Policies) {
 				mergeDirectError(summary.errors, fact)
 			}
 		}
@@ -134,11 +136,16 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 					}) || changed
 					continue
 				}
-				if callee.node.Execution != ExecutionAsynchronous || call.PropagateAsyncErrors {
-					for _, entry := range callee.errors {
-						if allowsError(errorIdentity(entry.fact), entry.supertypes, call.Policies) {
-							changed = mergeError(current.errors, entry) || changed
+				for _, entry := range callee.errors {
+					if entry.fact.Timing == ExecutionAsynchronous && !call.PropagateAsyncErrors {
+						continue
+					}
+					if allowsError(errorType(entry.fact), entry.supertypes, call.Policies) {
+						incoming := entry
+						if current.node.AsyncBoundary && incoming.fact.Timing == ExecutionSynchronous {
+							incoming.fact.Timing = ExecutionAsynchronous
 						}
+						changed = mergeError(current.errors, incoming) || changed
 					}
 				}
 				for _, fact := range facts(callee.effects) {
@@ -198,11 +205,15 @@ func contains(values []string, value string) bool {
 	return false
 }
 
-func errorIdentity(fact OperationalFact) string {
+func errorType(fact OperationalFact) string {
 	if fact.Type != "" {
 		return fact.Type
 	}
 	return fact.Name
+}
+
+func errorIdentity(fact OperationalFact) string {
+	return errorType(fact) + "\x00" + string(fact.Timing)
 }
 
 func mergeDirectError(set errorSet, direct directError) bool {
@@ -218,7 +229,11 @@ func mergeError(set errorSet, incoming errorEntry) bool {
 	entry, ok := set[key]
 	if !ok {
 		entry = errorEntry{
-			fact:       OperationalFact{Name: incoming.fact.Name, Type: incoming.fact.Type},
+			fact: OperationalFact{
+				Name:   incoming.fact.Name,
+				Type:   incoming.fact.Type,
+				Timing: incoming.fact.Timing,
+			},
 			supertypes: append([]string(nil), incoming.supertypes...),
 			provenance: map[string]Provenance{},
 		}

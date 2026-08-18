@@ -198,16 +198,30 @@ function caller(): void { first(); second(); }
 func TestOperationalSemanticsIgnoreDeclarationOrder(t *testing.T) {
 	first := analyzeOperationalFixture(t, map[string]string{
 		"main.ts": `class OrderedError extends Error {}
+class ScopedError extends Error {}
 function source(): void { throw new OrderedError("failed"); }
 function caller(): void { source(); }
+function scoped(include: boolean): void {
+  if (include) {
+    function local(): void { throw new ScopedError("scoped"); }
+    local();
+  }
+}
 function unrelated(): number { return 1; }
 `,
 	})
 	second := analyzeOperationalFixture(t, map[string]string{
 		"main.ts": `class OrderedError extends Error {}
+class ScopedError extends Error {}
 function unrelated(): number { return 1; }
 function caller(): void { source(); }
 function source(): void { throw new OrderedError("failed"); }
+function scoped(include: boolean): void {
+  if (include) {
+    function local(): void { throw new ScopedError("scoped"); }
+    local();
+  }
+}
 `,
 	})
 
@@ -240,12 +254,18 @@ function blocks(first: boolean): void {
     local();
   }
 }
+class Containers {
+  first = { run: (): void => { throw new FirstError("first"); } };
+  second = { run: (): void => { throw new SecondError("second"); } };
+}
+function onlyFirst(container: Containers): void { container.first.run(); }
 `,
 	})
 
 	onlyA := summaryNamed(t, result.Summaries, "main.ts::onlyA")
 	assertErrorTypes(t, onlyA.Errors, "main.ts::A.SameError")
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::blocks").Errors, "FirstError", "SecondError")
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::onlyFirst").Errors, "FirstError")
 }
 
 func TestOperationalAsyncErrorsRequireAwaitOrReturn(t *testing.T) {
@@ -258,6 +278,13 @@ async function fail(): Promise<void> {
 function fireAndForget(): void { void fail(); }
 async function awaited(): Promise<void> { await fail(); }
 function returned(): Promise<void> { return fail(); }
+class SyncFactoryError extends Error {}
+declare const pending: Promise<void>;
+function factory(shouldFail: boolean): Promise<void> {
+  if (shouldFail) throw new SyncFactoryError("sync");
+  return pending;
+}
+function invokeFactory(): void { void factory(true); }
 `,
 	})
 
@@ -266,6 +293,11 @@ function returned(): Promise<void> { return fail(); }
 	assertFactNames(t, fireAndForget.Effects, "network")
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::awaited").Errors, "AsyncFailure")
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::returned").Errors, "AsyncFailure")
+	factoryError := summaryNamed(t, result.Summaries, "main.ts::invokeFactory").Errors
+	assertFactNames(t, factoryError, "SyncFactoryError")
+	if factoryError[0].Timing != ExecutionSynchronous {
+		t.Fatalf("synchronous factory error classified %q", factoryError[0].Timing)
+	}
 }
 
 func TestOperationalCatchPoliciesUseTypeIdentityAndInheritance(t *testing.T) {
@@ -308,11 +340,15 @@ class Box {
 }
 function read(box: Box): number { return box.value; }
 function write(box: Box): void { box.value = 1; }
+function negate(box: Box): boolean { return !box.value; }
 `,
 	})
 
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::read").Errors, "ReadError")
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::write").Effects, "io")
+	negate := summaryNamed(t, result.Summaries, "main.ts::negate")
+	assertFactNames(t, negate.Errors, "ReadError")
+	assertFactNames(t, negate.Effects)
 }
 
 func TestOperationalDefaultParametersAreExecutable(t *testing.T) {
