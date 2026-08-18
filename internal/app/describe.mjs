@@ -168,7 +168,7 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     if (symbol) {
       signatures = checker.getSignaturesOfType(
         checker.getTypeOfSymbolAtLocation(symbol, node),
-        ts.SignatureKind.Call,
+        ts.isConstructorDeclaration(node) ? ts.SignatureKind.Construct : ts.SignatureKind.Call,
       );
     }
     if (signatures.length === 0 && isCallable(node)) {
@@ -197,13 +197,24 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     return symbol ? ts.displayPartsToString(symbol.getDocumentationComment(checker)) : "";
   }
 
-  function aliases(canonical, name, packageIdentity) {
+  function aliases(canonical, name, packageIdentity, symbol, node) {
     const qualified = canonical.includes("::") ? canonical.split("::")[1] : canonical;
     const values = new Set([canonical, qualified, name]);
+    const moduleSymbol = node.getSourceFile().symbol;
+    const publicNames = !qualified.includes(".") && moduleSymbol
+      ? checker.getExportsOfModule(moduleSymbol)
+        .filter((value) => resolveAlias(value) === symbol)
+        .map((value) => value.name)
+      : [];
+    for (const publicName of publicNames) values.add(publicName);
     if (packageIdentity) {
       const subpath = packageIdentity.export === "." ? "" : packageIdentity.export.slice(1);
       values.add(`${packageIdentity.name}${subpath}.${qualified}`);
       values.add(`${packageIdentity.name}${subpath}#${qualified}`);
+      for (const publicName of publicNames) {
+        values.add(`${packageIdentity.name}${subpath}.${publicName}`);
+        values.add(`${packageIdentity.name}${subpath}#${publicName}`);
+      }
     }
     return [...values].filter(Boolean).sort();
   }
@@ -220,7 +231,7 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       kind: kind(node),
       visibility: visibility(node, symbol),
       documentation: documentation(symbol),
-      aliases: aliases(canonical, name, packageIdentity),
+      aliases: aliases(canonical, name, packageIdentity, symbol, node),
       location: { path: stablePath(node.getSourceFile().fileName), range: sourceRange(namedNode) },
       typeParameters: primary?.typeParameters ?? declarationTypeParameters(node),
       parameters: primary?.parameters ?? [],
@@ -243,7 +254,14 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
   function declaredNode(dependency, canonical) {
     const parts = canonical.split("::")[1]?.split(".") ?? [];
     if (parts.length === 0) return undefined;
-    let symbol = exportsOf(dependency.declarationFile).get(parts[0].replace(/^(get|set):/, ""));
+    const declarationExports = exportsOf(dependency.declarationFile);
+    let symbol = declarationExports.get(parts[0].replace(/^(get|set):/, ""));
+    if (!symbol && dependency.implementationFile) {
+      const implementationName = parts[0].replace(/^(get|set):/, "");
+      const implementationExport = [...exportsOf(dependency.implementationFile)]
+        .find(([, value]) => value.name === implementationName);
+      if (implementationExport) symbol = declarationExports.get(implementationExport[0]);
+    }
     for (const part of parts.slice(1)) {
       const name = part.replace(/^(get|set):/, "");
       symbol = symbol?.members?.get(name) ?? symbol?.exports?.get(name);
@@ -305,14 +323,17 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     function visit(node) {
       if ((ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)) && node.name) {
         const canonical = containerCanonical(node);
-        if (!byCanonical.has(canonical)) {
-          const directMembers = [];
-          const children = ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)
-            ? node.body.statements
-            : node.members ?? [];
-          for (const child of children) {
-            if (child.name) directMembers.push(child.name.getText(child.getSourceFile()));
-          }
+        const directMembers = [];
+        const children = ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)
+          ? node.body.statements
+          : node.members ?? [];
+        for (const child of children) {
+          if (child.name) directMembers.push(child.name.getText(child.getSourceFile()));
+        }
+        const existing = byCanonical.get(canonical);
+        if (existing) {
+          existing.members = [...new Set([...existing.members, ...directMembers])].sort();
+        } else {
           const declarationNode = dependency?.declarationFile ? declaredNode(dependency, canonical) : node;
           const description = makeDescription(declarationNode ?? node, canonical, dependency?.identity, directMembers);
           descriptions.push(description);

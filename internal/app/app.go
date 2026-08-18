@@ -228,7 +228,8 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 
 func writeContract(output io.Writer, contract SymbolContract) {
 	fmt.Fprintf(output, "%s (%s, %s)\n", contract.CanonicalName, contract.Kind, contract.Visibility)
-	fmt.Fprintf(output, "source: %s:%d:%d\n", contract.Location.Path, contract.Location.Range.Start.Line, contract.Location.Range.Start.Column)
+	fmt.Fprintln(output, "name:", contract.Name)
+	writeContractField(output, "location", contract.Location)
 	fmt.Fprintln(output, "documentation:", contract.Documentation)
 	writeContractField(output, "aliases", contract.Aliases)
 	writeContractField(output, "type parameters", contract.TypeParameters)

@@ -755,6 +755,65 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
       if (implementation) pairSymbols(declaration, implementation, dependency);
     }
   }
+  function visiblePackageMember(symbol) {
+    return !(symbol.declarations ?? []).some((declaration) =>
+      declaration.name && ts.isPrivateIdentifier(declaration.name) ||
+      declaration.modifiers?.some((modifier) =>
+        modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword,
+      ),
+    );
+  }
+
+  function synthesizePackageSymbol(symbol, canonical, dependency, includeSelf = true) {
+    symbol = resolveAlias(symbol);
+    if (!symbol) return;
+    if (includeSelf && !bySymbol.has(symbol) && !identifiers.has(canonical)) {
+      const declaration = (symbol.declarations ?? []).find(isCallable) ?? symbol.declarations?.[0];
+      if (declaration) {
+        identifiers.add(canonical);
+        const namedNode = declaration.name ?? declaration;
+        const signature = isCallable(declaration) ? checker.getSignatureFromDeclaration(declaration) : undefined;
+        const execution = signature && checker.getPromisedTypeOfPromise(checker.getReturnTypeOfSignature(signature))
+          ? "asynchronous"
+          : "synchronous";
+        const evidence = [{
+          symbol: canonical,
+          path: stableSourcePath(declaration.getSourceFile().fileName),
+          range: sourceRange(namedNode),
+        }];
+        const qualified = canonical.split("::")[1] ?? symbol.name;
+        const record = {
+          node: declaration,
+          symbol: canonical,
+          execution,
+          asyncBoundary: false,
+          location: { path: evidence[0].path, range: evidence[0].range },
+          package: dependency.identity,
+          errors: [],
+          effects: [],
+          unresolved: [{
+            symbol: qualified,
+            reason: dependency.reason ?? "declaration_only",
+            dimensions: ["errors", "effects", "execution"],
+            package: dependency.identity,
+            provenance: evidence,
+          }],
+          calls: [],
+        };
+        records.push(record);
+        bySymbol.set(symbol, record);
+        syntheticRecords.add(record);
+      }
+    }
+    for (const table of [symbol.members, symbol.exports]) {
+      if (!table) continue;
+      for (const [name, member] of table) {
+        if (name === "prototype" || !visiblePackageMember(member)) continue;
+        synthesizePackageSymbol(member, `${canonical}.${name}`, dependency);
+      }
+    }
+  }
+
   for (const dependency of packages) {
     if (!dependency.declarationFile) continue;
     const declarations = exportsOf(dependency.declarationFile);
@@ -766,45 +825,9 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
       : dependency.requestedNames ?? [];
     for (const name of requested) {
       const exported = declarations.get(name);
-      const symbol = resolveAlias(exported);
-      if (implementations.has(name)) continue;
-      if (!symbol || bySymbol.has(symbol)) continue;
-      const declaration = (symbol.declarations ?? []).find(isCallable) ?? symbol.declarations?.[0];
-      if (!declaration) continue;
+      if (!exported) continue;
       const canonical = `${stableSourcePath(dependency.implementationFile ?? dependency.declarationFile)}::${name}`;
-      if (identifiers.has(canonical)) continue;
-      identifiers.add(canonical);
-      const namedNode = declaration.name ?? declaration;
-      const signature = isCallable(declaration) ? checker.getSignatureFromDeclaration(declaration) : undefined;
-      const execution = signature && checker.getPromisedTypeOfPromise(checker.getReturnTypeOfSignature(signature))
-        ? "asynchronous"
-        : "synchronous";
-      const evidence = [{
-        symbol: canonical,
-        path: stableSourcePath(declaration.getSourceFile().fileName),
-        range: sourceRange(namedNode),
-      }];
-      const record = {
-        node: declaration,
-        symbol: canonical,
-        execution,
-        asyncBoundary: false,
-        location: { path: evidence[0].path, range: evidence[0].range },
-        package: dependency.identity,
-        errors: [],
-        effects: [],
-        unresolved: [{
-          symbol: name,
-          reason: dependency.reason ?? "declaration_only",
-          dimensions: ["errors", "effects", "execution"],
-          package: dependency.identity,
-          provenance: evidence,
-        }],
-        calls: [],
-      };
-      records.push(record);
-      bySymbol.set(symbol, record);
-      syntheticRecords.add(record);
+      synthesizePackageSymbol(exported, canonical, dependency, !implementations.has(name));
     }
   }
 

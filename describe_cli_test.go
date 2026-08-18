@@ -120,7 +120,7 @@ func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
 	}
 
 	namespace := runDescribe(t, root, "Tools")
-	if namespace.Contract.Kind != "namespace" || !reflect.DeepEqual(namespace.Contract.Members, []string{"parse"}) {
+	if namespace.Contract.Kind != "namespace" || !reflect.DeepEqual(namespace.Contract.Members, []string{"format", "parse"}) {
 		t.Fatalf("namespace: %+v", namespace.Contract)
 	}
 	helper := runDescribe(t, root, "helper")
@@ -131,6 +131,10 @@ func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
 	if arrow.Contract.Visibility != "exported" {
 		t.Fatalf("arrow visibility: %+v", arrow.Contract)
 	}
+	localAlias := runDescribe(t, root, "publicAlias")
+	if localAlias.Contract.CanonicalName != "src/main.ts::localImplementation" {
+		t.Fatalf("local export alias: %+v", localAlias.Contract)
+	}
 	overload := runDescribe(t, root, "overload")
 	if len(overload.Contract.Signatures) != 2 {
 		t.Fatalf("overloads: %+v", overload.Contract.Signatures)
@@ -138,6 +142,10 @@ func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
 	box := runDescribe(t, root, "Box")
 	if len(box.Contract.TypeParameters) != 1 || box.Contract.TypeParameters[0].Constraint == nil || box.Contract.TypeParameters[0].Constraint.Name != "string" {
 		t.Fatalf("generic class: %+v", box.Contract)
+	}
+	constructor := runDescribe(t, root, "Overloaded.constructor")
+	if len(constructor.Contract.Signatures) != 2 {
+		t.Fatalf("constructor overloads: %+v", constructor.Contract.Signatures)
 	}
 }
 
@@ -164,12 +172,22 @@ func TestDescribeDependencyContractsMatchOperationalFacts(t *testing.T) {
 	if len(convert.Contract.Signatures) != 2 {
 		t.Fatalf("dependency overloads: %+v", convert.Contract.Signatures)
 	}
+	packageAlias := runDescribe(t, root, "demo.aliasedConvert")
+	if !strings.HasSuffix(packageAlias.Contract.CanonicalName, "::internalAlias") {
+		t.Fatalf("package export alias: %+v", packageAlias.Contract)
+	}
 
 	declarationOnly := runDescribe(t, root, "decl-only.only")
 	if declarationOnly.Contract.Completeness != "partial" || len(declarationOnly.Contract.Unresolved) != 1 ||
 		declarationOnly.Contract.Unresolved[0].Reason != "declaration_only" ||
 		declarationOnly.Contract.Package == nil || declarationOnly.Contract.Package.Implementation != "" {
 		t.Fatalf("declaration-only dependency: %+v", declarationOnly.Contract)
+	}
+	member := runDescribe(t, root, "decl-only.NativeClient.request")
+	if member.Contract.Kind != "method" || member.Contract.Execution != "asynchronous" ||
+		member.Contract.Completeness != "partial" || len(member.Contract.Unresolved) != 1 ||
+		member.Contract.Unresolved[0].Reason != "declaration_only" {
+		t.Fatalf("declaration-only member: %+v", member.Contract)
 	}
 }
 
@@ -213,13 +231,21 @@ func TestDescribeUnknownAndAmbiguousSymbols(t *testing.T) {
 	if err := json.Unmarshal([]byte(unknown), &unknownDocument); err != nil {
 		t.Fatal(err)
 	}
-	if unknownCode != 1 || unknownDocument.Error == nil || unknownDocument.Error.Kind != "unknown_symbol" || !reflect.DeepEqual(unknownDocument.Error.Alternatives, []string{"src/main.ts::load", "src/main.ts::overload"}) {
+	if unknownCode != 1 || unknownDocument.Error == nil || unknownDocument.Error.Kind != "unknown_symbol" {
 		t.Fatalf("unknown exit %d, output %+v", unknownCode, unknownDocument)
+	}
+	foundLoad := false
+	for _, alternative := range unknownDocument.Error.Alternatives {
+		foundLoad = foundLoad || alternative == "src/main.ts::load"
+	}
+	if !foundLoad {
+		t.Fatalf("missing load alternative: %+v", unknownDocument.Error.Alternatives)
 	}
 
 	human, humanErr, humanCode := runSlick(t, root, nil, "describe", "Client.request")
 	if humanCode != 0 || humanErr != "" || !strings.Contains(human, "src/main.ts::Client.request") ||
-		!strings.Contains(human, `effects: [{"name":"network"`) ||
+		!strings.Contains(human, "name: request") || !strings.Contains(human, `"end"`) ||
+		!strings.Contains(human, `"offset"`) || !strings.Contains(human, `effects: [{"name":"network"`) ||
 		!strings.Contains(human, `"provenance"`) || !strings.Contains(human, "aliases:") ||
 		!strings.Contains(human, "completeness: complete") {
 		t.Fatalf("human exit %d, stderr %q, output %q", humanCode, humanErr, human)
@@ -231,10 +257,12 @@ func describeProject(t *testing.T) string {
 	return project(t, strictConfig, map[string]string{
 		"package.json": `{"type":"module"}`,
 		"src/main.ts": `
-import { convert, fail, partial, remote } from "demo";
-import { only } from "decl-only";
+import { aliasedConvert, convert, fail, partial, remote } from "demo";
+import { NativeClient, only } from "decl-only";
 function helper(): number { return 0; }
 export const exportedArrow = (): number => helper();
+function localImplementation(): number { return 1; }
+export { localImplementation as publicAlias };
 export function overload(value: string): string;
 export function overload(value: number): number;
 export function overload(value: string | number): string | number { return value; }
@@ -245,14 +273,24 @@ export class Client {
 	async request(url: string): Promise<Response> { return fetch(url); }
 }
 export class Box<T extends string> { constructor(readonly value: T) {} }
+export class Overloaded {
+	constructor(value: string);
+	constructor(value: number);
+	constructor(value: string | number) { void value; }
+}
 export namespace Tools {
 	export function parse(value: unknown): string { return typeof value === "string" ? value : ""; }
+}
+export namespace Tools {
+	export function format(value: number): string { return String(value); }
 }
 export async function useRemote() { return remote(); }
 export function useFail() { return fail(); }
 export function usePartial() { return partial(); }
 export function useConvert() { return convert("value"); }
+export function useAliasedConvert() { return aliasedConvert("value"); }
 export function useOnly() { return only(); }
+export function useNativeClient(client: NativeClient) { return client.request(); }
 `,
 		"src/a.ts": `export function same(): number { return 1; }`,
 		"src/b.ts": `export function same(): number { return 2; }`,
@@ -269,6 +307,8 @@ export declare function fail(): never;
 export declare function partial(): unknown;
 export declare function convert(value: string): string;
 export declare function convert(value: number): number;
+declare function internalAlias(value: string): string;
+export { internalAlias as aliasedConvert };
 `,
 		"node_modules/demo/index.js": `
 export class PackageError extends Error {}
@@ -276,13 +316,18 @@ export function remote() { return fetch("https://example.test"); }
 export function fail() { throw new PackageError("failed"); }
 export function partial() { return eval("1"); }
 export function convert(value) { return value; }
+function internalAlias(value) { return value; }
+export { internalAlias as aliasedConvert };
 `,
 		"node_modules/decl-only/package.json": `{
 			"name":"decl-only",
 			"version":"4.0.0",
 			"types":"index.d.ts"
 		}`,
-		"node_modules/decl-only/index.d.ts": `export declare function only(): void;`,
+		"node_modules/decl-only/index.d.ts": `
+export declare function only(): void;
+export declare class NativeClient { request(): Promise<Response>; }
+`,
 	})
 }
 
@@ -294,7 +339,7 @@ func runDescribe(t *testing.T, root, symbol string) describeOutput {
 		t.Fatalf("decode %q: %v", output, err)
 	}
 	if code != 0 || stderr != "" || !document.Success || document.Version != 1 || document.Command != "describe" || document.Contract == nil {
-		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
 	}
 	return document
 }

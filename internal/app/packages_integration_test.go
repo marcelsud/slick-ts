@@ -188,6 +188,26 @@ func TestPackageCacheFailureFallsBackToAnalysis(t *testing.T) {
 	assertFactNames(t, request.Effects, "network")
 }
 
+func TestPackageMissingNamedExportRemainsTypeScriptDiagnostic(t *testing.T) {
+	root, config := packageFixture(t)
+	writeTestFile(t, filepath.Join(root, "src", "main.ts"), `import { missing } from "demo"; missing();`)
+	compiler, err := filepath.Abs(filepath.Join("..", "..", "node_modules", "typescript", "lib", "typescript.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
+	result := (NodeAnalyzer{}).Analyze(context.Background(), config)
+	if result.Failure != nil {
+		t.Fatalf("invalid import became analyzer failure: %+v", result.Failure)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Source == "typescript" && diagnostic.Code == 2305 {
+			return
+		}
+	}
+	t.Fatalf("missing TS2305 diagnostic: %+v", result.Diagnostics)
+}
+
 func packageFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
