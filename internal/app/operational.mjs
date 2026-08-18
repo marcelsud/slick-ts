@@ -3,6 +3,7 @@ function analyzeOperational(program, projectRoot, ts) {
   const records = [];
   const byDeclaration = new Map();
   const bySymbol = new Map();
+  const identifiers = new Set();
 
   function stableSourcePath(fileName) {
     return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
@@ -34,7 +35,10 @@ function analyzeOperational(program, projectRoot, ts) {
 
   function bindingName(node) {
     if (node.name) {
-      return node.name.getText(node.getSourceFile());
+      const name = node.name.getText(node.getSourceFile());
+      if (ts.isGetAccessorDeclaration(node)) return `get:${name}`;
+      if (ts.isSetAccessorDeclaration(node)) return `set:${name}`;
+      return name;
     }
     if (ts.isConstructorDeclaration(node)) {
       return "constructor";
@@ -49,21 +53,17 @@ function analyzeOperational(program, projectRoot, ts) {
     return undefined;
   }
 
-  function symbolName(node) {
-    const ownName = bindingName(node);
-    if (!ownName) {
-      return undefined;
-    }
+  function lexicalName(node, ownName) {
     const parts = [ownName];
     let current = node.parent;
     while (current && !ts.isSourceFile(current)) {
       if (isCallable(current)) {
         const name = bindingName(current);
-        if (name) {
-          parts.unshift(name);
-        }
+        if (name) parts.unshift(name);
       } else if ((ts.isClassDeclaration(current) || ts.isClassExpression(current)) && current.name) {
         parts.unshift(current.name.text);
+      } else if (ts.isModuleDeclaration(current)) {
+        parts.unshift(current.name.getText(current.getSourceFile()));
       } else if (
         ts.isVariableDeclaration(current) &&
         current.name &&
@@ -71,10 +71,21 @@ function analyzeOperational(program, projectRoot, ts) {
         (ts.isObjectLiteralExpression(current.initializer) || ts.isClassExpression(current.initializer))
       ) {
         parts.unshift(current.name.getText(current.getSourceFile()));
+      } else if (
+        (ts.isBlock(current) && !(isCallable(current.parent) && current.parent.body === current)) ||
+        ts.isCaseClause(current) ||
+        ts.isDefaultClause(current)
+      ) {
+        parts.unshift(`scope@${current.getStart(current.getSourceFile())}`);
       }
       current = current.parent;
     }
     return `${stableSourcePath(node.getSourceFile().fileName)}::${parts.join(".")}`;
+  }
+
+  function symbolName(node) {
+    const ownName = bindingName(node);
+    return ownName ? lexicalName(node, ownName) : undefined;
   }
 
   function nameNode(node) {
@@ -95,6 +106,10 @@ function analyzeOperational(program, projectRoot, ts) {
     if (isCallable(node) && node.body) {
       const symbol = symbolName(node);
       if (symbol) {
+        if (identifiers.has(symbol)) {
+          throw new Error(`duplicate operational symbol ${symbol}`);
+        }
+        identifiers.add(symbol);
         const namedNode = nameNode(node) ?? node;
         const record = {
           node,
@@ -179,13 +194,14 @@ function analyzeOperational(program, projectRoot, ts) {
       if (["setTimeout", "setInterval"].includes(callee.text) && isExternalSymbol(symbol)) return "time";
       if (["alert", "confirm", "prompt"].includes(callee.text) && isExternalSymbol(symbol)) return "io";
       if (callee.text === "WebSocket" && isExternalSymbol(symbol)) return "network";
+      if (callee.text === "Date" && ts.isCallExpression(call) && isExternalSymbol(symbol)) return "time";
     }
     if (ts.isNewExpression(call) && ts.isIdentifier(callee)) {
-      if (callee.text === "Date" && isExternalSymbol(symbol)) return "time";
+      if (callee.text === "Date" && isExternalSymbol(symbol)) return (call.arguments?.length ?? 0) === 0 ? "time" : "pure";
       if (callee.text === "WebSocket" && isExternalSymbol(symbol)) return "network";
     }
     const files = declarationFiles(symbol);
-    if (files.some((fileName) => /\/(@types\/node\/)?fs(?:\/promises)?\.d\.ts$/.test(fileName))) return "filesystem";
+    if (files.some((fileName) => /\/node_modules\/@types\/node\/fs(?:\/promises)?\.d\.ts$/.test(fileName))) return "filesystem";
     if (!ts.isPropertyAccessExpression(callee)) {
       return undefined;
     }
@@ -206,7 +222,12 @@ function analyzeOperational(program, projectRoot, ts) {
     if (!ts.isPropertyAccessExpression(node)) {
       return undefined;
     }
-    if (node.getText(node.getSourceFile()) === "process.env" && receiverIsExternal(node.expression)) {
+    if (
+      node.name.text === "env" &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "process" &&
+      receiverIsExternal(node.expression)
+    ) {
       return "environment";
     }
     return undefined;
@@ -223,15 +244,42 @@ function analyzeOperational(program, projectRoot, ts) {
     return (type.getBaseTypes?.() ?? []).some((base) => isErrorType(base, seen));
   }
 
+  function typeIdentity(type) {
+    const symbol = type.aliasSymbol ?? type.symbol;
+    if (!symbol) return checker.typeToString(type);
+    const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+    if (declaration) {
+      const relative = path.relative(projectRoot, path.resolve(declaration.getSourceFile().fileName));
+      if (relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`)) {
+        return lexicalName(declaration, symbol.name);
+      }
+    }
+    return checker.getFullyQualifiedName(symbol).replace(/^\".*\"\\./, "");
+  }
+
+  function errorDetails(type) {
+    const symbol = type.aliasSymbol ?? type.symbol;
+    const supertypes = new Set();
+    function collect(current) {
+      for (const base of current.getBaseTypes?.() ?? []) {
+        supertypes.add(typeIdentity(base));
+        collect(base);
+      }
+    }
+    collect(type);
+    return {
+      name: symbol?.name ?? checker.typeToString(type),
+      type: typeIdentity(type),
+      supertypes: [...supertypes].sort(),
+    };
+  }
+
   function concreteError(expression) {
     if (!ts.isNewExpression(expression)) {
       return undefined;
     }
     const type = checker.getTypeAtLocation(expression);
-    if (!isErrorType(type)) {
-      return undefined;
-    }
-    return type.aliasSymbol?.name ?? type.symbol?.name ?? expression.expression.getText(expression.getSourceFile());
+    return isErrorType(type) ? errorDetails(type) : undefined;
   }
 
   function catchVariable(node) {
@@ -250,8 +298,13 @@ function analyzeOperational(program, projectRoot, ts) {
   }
 
   function instanceOfType(expression, variable) {
-    while (ts.isParenthesizedExpression(expression)) {
-      expression = expression.expression;
+    let negated = false;
+    while (ts.isParenthesizedExpression(expression) || ts.isPrefixUnaryExpression(expression)) {
+      if (ts.isPrefixUnaryExpression(expression)) {
+        if (expression.operator !== ts.SyntaxKind.ExclamationToken) return undefined;
+        negated = !negated;
+      }
+      expression = expression.operand ?? expression.expression;
     }
     if (
       !ts.isBinaryExpression(expression) ||
@@ -261,8 +314,11 @@ function analyzeOperational(program, projectRoot, ts) {
     ) {
       return undefined;
     }
-    const type = checker.getTypeAtLocation(expression.right);
-    return type.symbol?.name ?? expression.right.getText(expression.getSourceFile());
+    const constructor = checker.getTypeAtLocation(expression.right);
+    const signature = checker.getSignaturesOfType(constructor, ts.SignatureKind.Construct)[0];
+    if (!signature) return undefined;
+    const instance = checker.getReturnTypeOfSignature(signature);
+    return { type: typeIdentity(instance), negated };
   }
 
   function containsRethrow(statement, variable) {
@@ -295,10 +351,14 @@ function analyzeOperational(program, projectRoot, ts) {
     let current = throwStatement.parent;
     while (current && current !== catchClause.block) {
       if (ts.isIfStatement(current)) {
-        const name = instanceOfType(current.expression, variable);
-        if (name) {
-          if (child === current.thenStatement) return { mode: "only", name };
-          if (child === current.elseStatement) return { mode: "except", name };
+        const guard = instanceOfType(current.expression, variable);
+        if (guard) {
+          if (child === current.thenStatement) {
+            return { mode: guard.negated ? "except" : "only", type: guard.type };
+          }
+          if (child === current.elseStatement) {
+            return { mode: guard.negated ? "only" : "except", type: guard.type };
+          }
         }
       }
       child = current;
@@ -315,14 +375,19 @@ function analyzeOperational(program, projectRoot, ts) {
     const variable = declaration.name.text;
     const handled = new Set();
     const only = new Set();
+    const unguardedOnly = new Set();
     let rethrowRest = false;
 
     function visit(node) {
       if (node !== catchClause.block && isCallable(node)) return;
       if (ts.isIfStatement(node)) {
-        const name = instanceOfType(node.expression, variable);
-        if (name && terminates(node.thenStatement) && !containsRethrow(node.thenStatement, variable)) {
-          handled.add(name);
+        const guard = instanceOfType(node.expression, variable);
+        if (guard && terminates(node.thenStatement) && !containsRethrow(node.thenStatement, variable)) {
+          if (guard.negated) {
+            unguardedOnly.add(guard.type);
+          } else {
+            handled.add(guard.type);
+          }
         }
       }
       if (ts.isThrowStatement(node) && ts.isIdentifier(node.expression) && node.expression.text === variable) {
@@ -330,9 +395,9 @@ function analyzeOperational(program, projectRoot, ts) {
         if (!guard) {
           rethrowRest = true;
         } else if (guard.mode === "only") {
-          only.add(guard.name);
+          only.add(guard.type);
         } else {
-          handled.add(guard.name);
+          handled.add(guard.type);
           rethrowRest = true;
         }
       }
@@ -341,10 +406,13 @@ function analyzeOperational(program, projectRoot, ts) {
     visit(catchClause.block);
 
     if (rethrowRest) {
-      return handled.size > 0 ? { mode: "except", names: [...handled].sort() } : undefined;
+      if (unguardedOnly.size > 0) {
+        return { mode: "only", types: [...unguardedOnly].sort() };
+      }
+      return handled.size > 0 ? { mode: "except", types: [...handled].sort() } : undefined;
     }
     if (only.size > 0) {
-      return { mode: "only", names: [...only].sort() };
+      return { mode: "only", types: [...only].sort() };
     }
     return { mode: "none" };
   }
@@ -390,15 +458,73 @@ function analyzeOperational(program, projectRoot, ts) {
     };
   }
 
+  function forwardsAsyncErrors(node, record) {
+    let current = node;
+    while (current.parent && current !== record.node) {
+      const parent = current.parent;
+      if (ts.isAwaitExpression(parent) || ts.isReturnStatement(parent) || ts.isYieldExpression(parent)) {
+        return true;
+      }
+      if (ts.isArrowFunction(record.node) && record.node.body === current) {
+        return true;
+      }
+      if (
+        ts.isParenthesizedExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isTypeAssertionExpression(parent) ||
+        ts.isNonNullExpression(parent) ||
+        ts.isSatisfiesExpression(parent)
+      ) {
+        current = parent;
+        continue;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  function accessorTargets(node) {
+    if (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node)) {
+      return [];
+    }
+    const location = ts.isPropertyAccessExpression(node) ? node.name : node.argumentExpression;
+    const symbol = checker.getSymbolAtLocation(location) ?? checker.getSymbolAtLocation(node);
+    if (!symbol) return [];
+    let read = true;
+    let write = false;
+    const parent = node.parent;
+    if (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      write = true;
+      read = parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken;
+    } else if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
+      read = true;
+      write = true;
+    }
+    const targets = [];
+    for (const declaration of resolveAlias(symbol).declarations ?? []) {
+      if ((read && ts.isGetAccessorDeclaration(declaration)) || (write && ts.isSetAccessorDeclaration(declaration))) {
+        const target = byDeclaration.get(declaration);
+        if (target) targets.push(target);
+      }
+    }
+    return targets;
+  }
+
   function analyze(record) {
     function visit(node) {
       if (node !== record.node.body && isCallable(node)) {
         return;
       }
       if (ts.isThrowStatement(node)) {
-        const name = concreteError(node.expression);
-        if (name) {
-          record.errors.push({ name, provenance: provenance(record, node), policies: policiesFor(node, record) });
+        const error = concreteError(node.expression);
+        if (error) {
+          record.errors.push({
+            name: error.name,
+            type: error.type,
+            supertypes: error.supertypes,
+            provenance: provenance(record, node),
+            policies: policiesFor(node, record),
+          });
         } else if (!(ts.isIdentifier(node.expression) && node.expression.text === catchVariable(node))) {
           record.unresolved.push({
             symbol: node.expression.getText(node.getSourceFile()),
@@ -408,30 +534,44 @@ function analyzeOperational(program, projectRoot, ts) {
         }
       }
       if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-        if (!(ts.isNewExpression(node) && ts.isThrowStatement(node.parent))) {
-          const target = localTarget(node);
-          if (target) {
-            record.calls.push({
-              target: target.symbol,
-              provenance: provenance(record, node),
-              policies: policiesFor(node, record),
-            });
-          } else {
-            const effect = modeledEffect(node);
-            if (effect) {
-              record.effects.push({ name: effect, provenance: provenance(record, node) });
-            } else {
-              record.unresolved.push(unresolvedCall(node, record));
-            }
+        const concreteConstruction = ts.isNewExpression(node) && ts.isThrowStatement(node.parent) && concreteError(node);
+        const target = localTarget(node);
+        if (target) {
+          record.calls.push({
+            target: target.symbol,
+            provenance: provenance(record, node),
+            policies: policiesFor(node, record),
+            propagateAsyncErrors: forwardsAsyncErrors(node, record),
+          });
+        } else {
+          const effect = modeledEffect(node);
+          if (effect && effect !== "pure") {
+            record.effects.push({ name: effect, provenance: provenance(record, node) });
+          } else if (effect !== "pure" && !concreteConstruction) {
+            record.unresolved.push(unresolvedCall(node, record));
           }
         }
-      } else {
-        const effect = propertyEffect(node);
-        if (effect) {
-          record.effects.push({ name: effect, provenance: provenance(record, node) });
+      } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const targets = accessorTargets(node);
+        for (const target of targets) {
+          record.calls.push({
+            target: target.symbol,
+            provenance: provenance(record, node),
+            policies: policiesFor(node, record),
+            propagateAsyncErrors: forwardsAsyncErrors(node, record),
+          });
+        }
+        if (targets.length === 0) {
+          const effect = propertyEffect(node);
+          if (effect) {
+            record.effects.push({ name: effect, provenance: provenance(record, node) });
+          }
         }
       }
       ts.forEachChild(node, visit);
+    }
+    for (const parameter of record.node.parameters ?? []) {
+      if (parameter.initializer) visit(parameter.initializer);
     }
     visit(record.node.body);
   }

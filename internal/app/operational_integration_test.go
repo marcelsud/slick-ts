@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 )
@@ -131,12 +132,16 @@ function incomplete(): void { opaqueOperation(); }
 
 func TestOperationalModelsInitialAuthoritySet(t *testing.T) {
 	result := analyzeOperationalFixture(t, map[string]string{
-		"fs.d.ts": `export declare function readFile(path: string, callback: (error: Error | null, data: string) => void): void;`,
+		"node_modules/@types/node/package.json": `{"name":"@types/node","version":"0.0.0","types":"index.d.ts"}`,
+		"node_modules/@types/node/index.d.ts":   `/// <reference path="fs.d.ts" />`,
+		"node_modules/@types/node/fs.d.ts": `declare module "node:fs" {
+  export function readFile(path: string, callback: (error: Error | null, data: string) => void): void;
+}`,
 		"globals.d.ts": `declare const process: {
   env: Record<string, string | undefined>;
   exit(code?: number): never;
 };`,
-		"main.ts": `import { readFile } from "./fs.js";
+		"main.ts": `import { readFile } from "node:fs";
 function authorities(): void {
   indexedDB.open("slick");
   process.env.HOME;
@@ -213,6 +218,152 @@ function source(): void { throw new OrderedError("failed"); }
 	}
 }
 
+func TestOperationalSymbolsRespectNamespacesAndBlockScopes(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `class FirstError extends Error {}
+class SecondError extends Error {}
+namespace A {
+  export class SameError extends Error {}
+  export function run(): void { throw new SameError("a"); }
+}
+namespace B {
+  export class SameError extends Error {}
+  export function run(): void { throw new SameError("b"); }
+}
+function onlyA(): void { A.run(); }
+function blocks(first: boolean): void {
+  if (first) {
+    function local(): void { throw new FirstError("first"); }
+    local();
+  } else {
+    function local(): void { throw new SecondError("second"); }
+    local();
+  }
+}
+`,
+	})
+
+	onlyA := summaryNamed(t, result.Summaries, "main.ts::onlyA")
+	assertErrorTypes(t, onlyA.Errors, "main.ts::A.SameError")
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::blocks").Errors, "FirstError", "SecondError")
+}
+
+func TestOperationalAsyncErrorsRequireAwaitOrReturn(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `class AsyncFailure extends Error {}
+async function fail(): Promise<void> {
+  await fetch("https://example.com");
+  throw new AsyncFailure("failed");
+}
+function fireAndForget(): void { void fail(); }
+async function awaited(): Promise<void> { await fail(); }
+function returned(): Promise<void> { return fail(); }
+`,
+	})
+
+	fireAndForget := summaryNamed(t, result.Summaries, "main.ts::fireAndForget")
+	assertFactNames(t, fireAndForget.Errors)
+	assertFactNames(t, fireAndForget.Effects, "network")
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::awaited").Errors, "AsyncFailure")
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::returned").Errors, "AsyncFailure")
+}
+
+func TestOperationalCatchPoliciesUseTypeIdentityAndInheritance(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `namespace A {
+  export class SameError extends Error {}
+  export function raise(): void { throw new SameError("a"); }
+}
+namespace B {
+  export class SameError extends Error {}
+  export function raise(): void { throw new SameError("b"); }
+}
+function risky(): void { A.raise(); B.raise(); }
+function handlesBase(): void {
+  try { risky(); }
+  catch (error) {
+    if (error instanceof Error) return;
+    throw error;
+  }
+}
+function handlesAWithNegation(): void {
+  try { risky(); }
+  catch (error) {
+    if (!(error instanceof A.SameError)) throw error;
+  }
+}
+`,
+	})
+
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::handlesBase").Errors)
+	assertErrorTypes(t, summaryNamed(t, result.Summaries, "main.ts::handlesAWithNegation").Errors, "main.ts::B.SameError")
+}
+
+func TestOperationalAccessorCallsPropagateFacts(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `class ReadError extends Error {}
+class Box {
+  get value(): number { throw new ReadError("read"); }
+  set value(value: number) { console.log(value); }
+}
+function read(box: Box): number { return box.value; }
+function write(box: Box): void { box.value = 1; }
+`,
+	})
+
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::read").Errors, "ReadError")
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::write").Effects, "io")
+}
+
+func TestOperationalDefaultParametersAreExecutable(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `function load(response = fetch("https://example.com")): Promise<Response> {
+  return response;
+}
+`,
+	})
+
+	load := summaryNamed(t, result.Summaries, "main.ts::load")
+	assertFactNames(t, load.Effects, "network")
+	if load.Execution != ExecutionAsynchronous {
+		t.Fatalf("defaulted function classified %q", load.Execution)
+	}
+}
+
+func TestOperationalThrownConstructorsPropagateFacts(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `class SetupError extends Error {}
+class OperationError extends Error {
+  constructor() {
+    super("operation");
+    fetch("https://example.com");
+    if (Math.random() < 0) throw new SetupError("setup");
+  }
+}
+function fail(): never { throw new OperationError(); }
+`,
+	})
+
+	fail := summaryNamed(t, result.Summaries, "main.ts::fail")
+	assertFactNames(t, fail.Errors, "OperationError", "SetupError")
+	assertFactNames(t, fail.Effects, "network", "random")
+}
+
+func TestOperationalDateAuthorityDependsOnClockAccess(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `function epoch(): Date { return new Date(0); }
+function current(): [Date, string] { return [new Date(), Date()]; }
+`,
+	})
+
+	epoch := summaryNamed(t, result.Summaries, "main.ts::epoch")
+	assertFactNames(t, epoch.Effects)
+	if len(epoch.Unresolved) != 0 {
+		t.Fatalf("deterministic Date construction unresolved: %+v", epoch.Unresolved)
+	}
+	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::current").Effects, "time")
+}
+
 func analyzeOperationalFixture(t *testing.T, files map[string]string) Analysis {
 	t.Helper()
 	root := t.TempDir()
@@ -248,8 +399,19 @@ func assertFactNames(t *testing.T, facts []OperationalFact, expected ...string) 
 	for index, fact := range facts {
 		actual[index] = fact.Name
 	}
-	if !reflect.DeepEqual(actual, expected) {
+	if !slices.Equal(actual, expected) {
 		t.Fatalf("facts %v, want %v", actual, expected)
+	}
+}
+
+func assertErrorTypes(t *testing.T, facts []OperationalFact, expected ...string) {
+	t.Helper()
+	actual := make([]string, len(facts))
+	for index, fact := range facts {
+		actual[index] = fact.Type
+	}
+	if !slices.Equal(actual, expected) {
+		t.Fatalf("error types %v, want %v", actual, expected)
 	}
 }
 
@@ -267,7 +429,7 @@ func semanticProjection(summaries []OperationalSummary) []projectedSummary {
 	for _, summary := range summaries {
 		projected := projectedSummary{Symbol: summary.Symbol, Execution: summary.Execution}
 		for _, fact := range summary.Errors {
-			projected.Errors = append(projected.Errors, fact.Name)
+			projected.Errors = append(projected.Errors, fact.Type+":"+fact.Name)
 			for _, source := range fact.Provenance {
 				projected.Sources = append(projected.Sources, "error:"+fact.Name+":"+source.Symbol)
 			}

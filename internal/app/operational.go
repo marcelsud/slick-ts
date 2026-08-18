@@ -25,6 +25,7 @@ type Provenance struct {
 
 type OperationalFact struct {
 	Name       string       `json:"name"`
+	Type       string       `json:"type,omitempty"`
 	Provenance []Provenance `json:"provenance"`
 }
 
@@ -45,18 +46,20 @@ type OperationalSummary struct {
 
 type errorPolicy struct {
 	Mode  string   `json:"mode"`
-	Names []string `json:"names,omitempty"`
+	Types []string `json:"types,omitempty"`
 }
 
 type directError struct {
 	OperationalFact
-	Policies []errorPolicy `json:"policies,omitempty"`
+	Supertypes []string      `json:"supertypes,omitempty"`
+	Policies   []errorPolicy `json:"policies,omitempty"`
 }
 
 type callEdge struct {
-	Target     string        `json:"target"`
-	Provenance []Provenance  `json:"provenance"`
-	Policies   []errorPolicy `json:"policies,omitempty"`
+	Target               string        `json:"target"`
+	Provenance           []Provenance  `json:"provenance"`
+	Policies             []errorPolicy `json:"policies,omitempty"`
+	PropagateAsyncErrors bool          `json:"propagateAsyncErrors,omitempty"`
 }
 
 type operationalNode struct {
@@ -71,6 +74,14 @@ type operationalNode struct {
 
 type factSet map[string]map[string]Provenance
 
+type errorEntry struct {
+	fact       OperationalFact
+	supertypes []string
+	provenance map[string]Provenance
+}
+
+type errorSet map[string]errorEntry
+
 type unresolvedSet map[string]struct {
 	leaf       UnresolvedLeaf
 	provenance map[string]Provenance
@@ -78,7 +89,7 @@ type unresolvedSet map[string]struct {
 
 type mutableSummary struct {
 	node       operationalNode
-	errors     factSet
+	errors     errorSet
 	effects    factSet
 	unresolved unresolvedSet
 }
@@ -91,13 +102,13 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 	for _, node := range sortedNodes {
 		summary := &mutableSummary{
 			node:       node,
-			errors:     factSet{},
+			errors:     errorSet{},
 			effects:    factSet{},
 			unresolved: unresolvedSet{},
 		}
 		for _, fact := range node.Errors {
-			if allowsError(fact.Name, fact.Policies) {
-				mergeFact(summary.errors, fact.OperationalFact)
+			if allowsError(errorIdentity(fact.OperationalFact), fact.Supertypes, fact.Policies) {
+				mergeDirectError(summary.errors, fact)
 			}
 		}
 		for _, fact := range node.Effects {
@@ -123,9 +134,11 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 					}) || changed
 					continue
 				}
-				for _, fact := range facts(callee.errors) {
-					if allowsError(fact.Name, call.Policies) {
-						changed = mergeFact(current.errors, fact) || changed
+				if callee.node.Execution != ExecutionAsynchronous || call.PropagateAsyncErrors {
+					for _, entry := range callee.errors {
+						if allowsError(errorIdentity(entry.fact), entry.supertypes, call.Policies) {
+							changed = mergeError(current.errors, entry) || changed
+						}
 					}
 				}
 				for _, fact := range facts(callee.effects) {
@@ -145,7 +158,7 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 			Symbol:     node.Symbol,
 			Execution:  node.Execution,
 			Location:   node.Location,
-			Errors:     facts(summary.errors),
+			Errors:     errorFacts(summary.errors),
 			Effects:    facts(summary.effects),
 			Unresolved: unresolved(summary.unresolved),
 		})
@@ -153,18 +166,22 @@ func summarize(nodes []operationalNode) []OperationalSummary {
 	return result
 }
 
-func allowsError(name string, policies []errorPolicy) bool {
+func allowsError(typeID string, supertypes []string, policies []errorPolicy) bool {
 	allowed := true
 	for _, policy := range policies {
+		matches := contains(policy.Types, typeID)
+		for _, supertype := range supertypes {
+			matches = matches || contains(policy.Types, supertype)
+		}
 		switch policy.Mode {
 		case "none":
 			allowed = false
 		case "except":
-			if contains(policy.Names, name) {
+			if matches {
 				allowed = false
 			}
 		case "only":
-			if !contains(policy.Names, name) {
+			if !matches {
 				allowed = false
 			}
 		}
@@ -179,6 +196,50 @@ func contains(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func errorIdentity(fact OperationalFact) string {
+	if fact.Type != "" {
+		return fact.Type
+	}
+	return fact.Name
+}
+
+func mergeDirectError(set errorSet, direct directError) bool {
+	return mergeError(set, errorEntry{
+		fact:       direct.OperationalFact,
+		supertypes: direct.Supertypes,
+		provenance: provenanceMap(direct.Provenance),
+	})
+}
+
+func mergeError(set errorSet, incoming errorEntry) bool {
+	key := errorIdentity(incoming.fact)
+	entry, ok := set[key]
+	if !ok {
+		entry = errorEntry{
+			fact:       OperationalFact{Name: incoming.fact.Name, Type: incoming.fact.Type},
+			supertypes: append([]string(nil), incoming.supertypes...),
+			provenance: map[string]Provenance{},
+		}
+	}
+	changed := !ok
+	for provenanceKey, source := range incoming.provenance {
+		if _, exists := entry.provenance[provenanceKey]; !exists {
+			entry.provenance[provenanceKey] = source
+			changed = true
+		}
+	}
+	set[key] = entry
+	return changed
+}
+
+func provenanceMap(values []Provenance) map[string]Provenance {
+	result := make(map[string]Provenance, len(values))
+	for _, source := range values {
+		result[provenanceKey(source)] = source
+	}
+	return result
 }
 
 func mergeFact(set factSet, fact OperationalFact) bool {
@@ -217,6 +278,21 @@ func mergeUnresolved(set unresolvedSet, leaf UnresolvedLeaf) bool {
 	}
 	set[key] = entry
 	return changed
+}
+
+func errorFacts(set errorSet) []OperationalFact {
+	types := make([]string, 0, len(set))
+	for typeID := range set {
+		types = append(types, typeID)
+	}
+	sort.Strings(types)
+	result := make([]OperationalFact, 0, len(types))
+	for _, typeID := range types {
+		entry := set[typeID]
+		entry.fact.Provenance = sortedProvenance(entry.provenance)
+		result = append(result, entry.fact)
+	}
+	return result
 }
 
 func facts(set factSet) []OperationalFact {

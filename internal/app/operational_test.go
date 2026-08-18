@@ -46,7 +46,7 @@ func TestSummarizeAppliesCatchPoliciesOnlyToErrors(t *testing.T) {
 			Symbol: "src/main.ts::caller",
 			Calls: []callEdge{{
 				Target:   "src/main.ts::source",
-				Policies: []errorPolicy{{Mode: "except", Names: []string{"HandledError"}}},
+				Policies: []errorPolicy{{Mode: "except", Types: []string{"HandledError"}}},
 			}},
 		},
 	}
