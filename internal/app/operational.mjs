@@ -734,7 +734,14 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
         byDeclaration.set(declaredConstructor, constructorTarget);
         bySymbol.set(declared, constructorTarget);
       }
-      if (!implementedConstructor) pureConstructions.add(declared);
+      const hasImplicitWork = implementedClass.heritageClauses?.some(
+        (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+      ) || implementedClass.members.some(
+        (member) => ts.isPropertyDeclaration(member) &&
+          member.initializer &&
+          !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+      );
+      if (!implementedConstructor && !hasImplicitWork) pureConstructions.add(declared);
     }
   }
 

@@ -29,6 +29,10 @@ func TestOperationalAnalyzesReachablePackageImplementations(t *testing.T) {
 	if len(client.Unresolved) != 0 {
 		t.Fatalf("package class method remained unresolved: %+v", client.Unresolved)
 	}
+	fieldClient := summaryNamed(t, result.Summaries, "src/main.ts::useFieldClient")
+	if len(fieldClient.Unresolved) == 0 {
+		t.Fatalf("field initializer construction was declared pure: %+v", fieldClient)
+	}
 
 	caught := summaryNamed(t, result.Summaries, "src/main.ts::useCaught")
 	if len(caught.Errors) != 0 {
@@ -201,13 +205,14 @@ func packageFixture(t *testing.T) (string, string) {
 			"include": ["src/**/*.ts"]
 		}`,
 		"src/main.ts": `
-import { Client, PackageError, pure, request, fail, declarationOnly, dynamic } from "demo";
+import { Client, FieldClient, PackageError, pure, request, fail, declarationOnly, dynamic } from "demo";
 import { nativeCall } from "native-demo";
 import { type Erased } from "type-only-demo";
 export type PublicErased = Erased;
 export function usePure(value: number) { return pure(value); }
 export async function useRequest() { return await request(); }
 export async function useClient() { return await new Client().request(); }
+export function useFieldClient() { return new FieldClient(); }
 export function useFailure() { return fail(); }
 export function useCaught() {
 	try { fail(); }
@@ -232,6 +237,7 @@ export declare function pure(value: number): number;
 export declare function request(): Promise<Response>;
 export declare class PackageError extends Error {}
 export declare class Client { request(): Promise<Response>; }
+export declare class FieldClient { field: Promise<Response>; }
 export declare function fail(): never;
 export declare function declarationOnly(): void;
 export declare function dynamic(): unknown;
@@ -242,6 +248,7 @@ export function pure(value) { return value + 1; }
 export function request() { return transitive(); }
 export class PackageError extends Error {}
 export class Client { request() { return fetch("https://example.test"); } }
+export class FieldClient { field = fetch("https://example.test"); }
 export function fail() { throw new PackageError("failed"); }
 export function dynamic() { return eval("1"); }
 `,
