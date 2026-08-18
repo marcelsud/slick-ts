@@ -9,11 +9,6 @@
     "sourceMap": true,
     "declaration": true,
     "lib": ["ES2022", "DOM"],
-    "baseUrl": ".",
-    "paths": {
-      "fixture-dependency": ["packages/fixture-dependency"],
-      "declaration-only": ["packages/declaration-only"]
-    },
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts"]

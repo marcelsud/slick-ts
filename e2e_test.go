@@ -13,14 +13,10 @@ func TestEndToEndCheckDescribeBuildAndRun(t *testing.T) {
 	if err := os.CopyFS(root, os.DirFS(filepath.Join("testdata", "e2e"))); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"fixture-dependency", "declaration-only"} {
-		destination := filepath.Join(root, "node_modules", name)
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.CopyFS(destination, os.DirFS(filepath.Join(root, "packages", name))); err != nil {
-			t.Fatal(err)
-		}
+	command := exec.Command("npm", "install", "--ignore-scripts", "--no-audit", "--no-fund")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("install fixture dependencies: %v\n%s", err, output)
 	}
 
 	firstCheck, firstErr, firstCode := runSlick(t, root, nil, "check", "--json")
@@ -38,8 +34,23 @@ func TestEndToEndCheckDescribeBuildAndRun(t *testing.T) {
 		t.Fatalf("error contract: %+v", failure.Contract)
 	}
 	unresolved := runDescribe(t, root, "unresolvedCall")
-	if unresolved.Contract.Completeness != "partial" || len(unresolved.Contract.Unresolved) != 1 || unresolved.Contract.Unresolved[0].Reason != "declaration_only" || unresolved.Contract.Unresolved[0].Package == nil || unresolved.Contract.Unresolved[0].Package.Name != "declaration-only" {
+	if unresolved.Contract.Completeness != "partial" || len(unresolved.Contract.Unresolved) != 1 {
 		t.Fatalf("unresolved contract: %+v", unresolved.Contract)
+	}
+	leaf := unresolved.Contract.Unresolved[0]
+	if leaf.Symbol != "declarationOnly" || leaf.Reason != "declaration_only" ||
+		leaf.Package == nil || leaf.Package.Name != "declaration-only" ||
+		leaf.Package.Version != "4.5.6" || leaf.Package.Export != "." ||
+		leaf.Package.Declaration != "packages/declaration-only/index.d.ts" ||
+		len(leaf.Provenance) != 1 {
+		t.Fatalf("unresolved leaf identity: %+v", leaf)
+	}
+	evidence := leaf.Provenance[0]
+	if evidence.Symbol != "packages/declaration-only/index.d.ts::declarationOnly" ||
+		evidence.Path != "packages/declaration-only/index.d.ts" ||
+		evidence.Range.Start.Line != 1 || evidence.Range.Start.Column != 25 || evidence.Range.Start.Offset != 24 ||
+		evidence.Range.End.Line != 1 || evidence.Range.End.Column != 40 || evidence.Range.End.Offset != 39 {
+		t.Fatalf("unresolved leaf evidence: %+v", evidence)
 	}
 
 	buildOutput, buildErr, buildCode := runSlick(t, root, nil, "build", "--json")
@@ -47,7 +58,7 @@ func TestEndToEndCheckDescribeBuildAndRun(t *testing.T) {
 	if buildCode != 0 || buildErr != "" || !build.Success || len(build.Outputs) != 6 {
 		t.Fatalf("build exit %d, stderr %q, output %+v", buildCode, buildErr, build)
 	}
-	command := exec.Command("node", "--enable-source-maps", filepath.Join(root, "dist", "main.js"))
+	command = exec.Command("node", "--enable-source-maps", filepath.Join(root, "dist", "main.js"))
 	runtimeOutput, err := command.CombinedOutput()
 	if err != nil || string(runtimeOutput) != "hello slick\n" {
 		t.Fatalf("run emitted fixture: err=%v output=%q", err, runtimeOutput)
