@@ -14,12 +14,16 @@ type Range struct {
 }
 
 type Diagnostic struct {
-	Source   string `json:"source"`
-	Code     int    `json:"code"`
-	Category string `json:"category"`
-	Message  string `json:"message"`
-	Path     string `json:"path,omitempty"`
-	Range    *Range `json:"range,omitempty"`
+	Source      string   `json:"source"`
+	Code        int      `json:"code"`
+	Category    string   `json:"category"`
+	Title       string   `json:"title,omitempty"`
+	Message     string   `json:"message"`
+	Explanation string   `json:"explanation,omitempty"`
+	Fact        string   `json:"fact,omitempty"`
+	Repairs     []string `json:"repairs,omitempty"`
+	Path        string   `json:"path,omitempty"`
+	Range       *Range   `json:"range,omitempty"`
 }
 
 type Failure struct {

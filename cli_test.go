@@ -31,12 +31,16 @@ type checkOutput struct {
 }
 
 type diagnostic struct {
-	Source   string       `json:"source"`
-	Code     int          `json:"code"`
-	Category string       `json:"category"`
-	Message  string       `json:"message"`
-	Path     string       `json:"path"`
-	Range    *sourceRange `json:"range"`
+	Source      string       `json:"source"`
+	Code        int          `json:"code"`
+	Category    string       `json:"category"`
+	Title       string       `json:"title"`
+	Message     string       `json:"message"`
+	Explanation string       `json:"explanation"`
+	Fact        string       `json:"fact"`
+	Repairs     []string     `json:"repairs"`
+	Path        string       `json:"path"`
+	Range       *sourceRange `json:"range"`
 }
 
 type sourceRange struct {

@@ -79,7 +79,7 @@ function compare(a, b) {
 
 function normalize(diagnostics) {
   const unique = new Map();
-  for (const diagnostic of diagnostics.map(convertDiagnostic)) {
+  for (const diagnostic of diagnostics.map((value) => value.source === "slick" ? value : convertDiagnostic(value))) {
     const key = JSON.stringify(diagnostic);
     unique.set(key, diagnostic);
   }
@@ -150,9 +150,13 @@ const resolved = projectReferenceFailure
 const operational = projectReferenceFailure
   ? { graph: [], cache: { hits: 0, misses: 0 } }
   : analyzeOperational(resolved.program, projectRoot, ts, resolved.packages);
+const slickDiagnostics = projectReferenceFailure ||
+  diagnostics.some(({ category }) => category === ts.DiagnosticCategory.Error)
+  ? []
+  : analyzeStrict(program, projectRoot, ts, diagnostics);
 process.stdout.write(
   response(
-    normalize(diagnostics),
+    normalize([...diagnostics, ...slickDiagnostics]),
     projectReferenceFailure
       ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
       : undefined,
