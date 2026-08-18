@@ -135,6 +135,14 @@ func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
 	if localAlias.Contract.CanonicalName != "src/main.ts::localImplementation" {
 		t.Fatalf("local export alias: %+v", localAlias.Contract)
 	}
+	localClassAlias := runDescribe(t, root, "PublicClient.request")
+	if !strings.HasSuffix(localClassAlias.Contract.CanonicalName, "::LocalInternalClient.request") {
+		t.Fatalf("local class alias: %+v", localClassAlias.Contract)
+	}
+	barrelAlias := runDescribe(t, root, "barrelAlias")
+	if barrelAlias.Contract.CanonicalName != "src/internal.ts::barrelTarget" {
+		t.Fatalf("barrel alias: %+v", barrelAlias.Contract)
+	}
 	overload := runDescribe(t, root, "overload")
 	if len(overload.Contract.Signatures) != 2 {
 		t.Fatalf("overloads: %+v", overload.Contract.Signatures)
@@ -183,11 +191,19 @@ func TestDescribeDependencyContractsMatchOperationalFacts(t *testing.T) {
 		declarationOnly.Contract.Package == nil || declarationOnly.Contract.Package.Implementation != "" {
 		t.Fatalf("declaration-only dependency: %+v", declarationOnly.Contract)
 	}
+	parent := runDescribe(t, root, "decl-only.NativeClient")
+	if !reflect.DeepEqual(parent.Contract.Members, []string{"request"}) {
+		t.Fatalf("declaration-only parent members: %+v", parent.Contract)
+	}
 	member := runDescribe(t, root, "decl-only.NativeClient.request")
 	if member.Contract.Kind != "method" || member.Contract.Execution != "asynchronous" ||
 		member.Contract.Completeness != "partial" || len(member.Contract.Unresolved) != 1 ||
 		member.Contract.Unresolved[0].Reason != "declaration_only" {
 		t.Fatalf("declaration-only member: %+v", member.Contract)
+	}
+	packageClassAlias := runDescribe(t, root, "demo.PublicService.request")
+	if !strings.HasSuffix(packageClassAlias.Contract.CanonicalName, "::InternalService.request") {
+		t.Fatalf("package class alias: %+v", packageClassAlias.Contract)
 	}
 }
 
@@ -257,12 +273,16 @@ func describeProject(t *testing.T) string {
 	return project(t, strictConfig, map[string]string{
 		"package.json": `{"type":"module"}`,
 		"src/main.ts": `
-import { aliasedConvert, convert, fail, partial, remote } from "demo";
+import { PublicService, aliasedConvert, convert, fail, partial, remote } from "demo";
 import { NativeClient, only } from "decl-only";
 function helper(): number { return 0; }
 export const exportedArrow = (): number => helper();
 function localImplementation(): number { return 1; }
 export { localImplementation as publicAlias };
+class LocalInternalClient {
+	request(url: string): Promise<Response> { return fetch(url); }
+}
+export { LocalInternalClient as PublicClient };
 export function overload(value: string): string;
 export function overload(value: number): number;
 export function overload(value: string | number): string | number { return value; }
@@ -287,13 +307,16 @@ export namespace Tools {
 export async function useRemote() { return remote(); }
 export function useFail() { return fail(); }
 export function usePartial() { return partial(); }
+export function usePublicService(service: PublicService) { return service.request("https://example.test"); }
 export function useConvert() { return convert("value"); }
 export function useAliasedConvert() { return aliasedConvert("value"); }
 export function useOnly() { return only(); }
 export function useNativeClient(client: NativeClient) { return client.request(); }
 `,
-		"src/a.ts": `export function same(): number { return 1; }`,
-		"src/b.ts": `export function same(): number { return 2; }`,
+		"src/a.ts":        `export function same(): number { return 1; }`,
+		"src/b.ts":        `export function same(): number { return 2; }`,
+		"src/internal.ts": `export function barrelTarget(): number { return 1; }`,
+		"src/barrel.ts":   `export { barrelTarget as barrelAlias } from "./internal.js";`,
 		"node_modules/demo/package.json": `{
 			"name":"demo",
 			"version":"1.2.3",
@@ -307,18 +330,22 @@ export declare function fail(): never;
 export declare function partial(): unknown;
 export declare function convert(value: string): string;
 export declare function convert(value: number): number;
-declare function internalAlias(value: string): string;
-export { internalAlias as aliasedConvert };
+declare class InternalService { request(url: string): Promise<Response>; }
+export { InternalService as PublicService };
+export { internalAlias as aliasedConvert } from "./internal.js";
 `,
 		"node_modules/demo/index.js": `
 export class PackageError extends Error {}
 export function remote() { return fetch("https://example.test"); }
 export function fail() { throw new PackageError("failed"); }
 export function partial() { return eval("1"); }
+class InternalService { request(url) { return fetch(url); } }
+export { InternalService as PublicService };
 export function convert(value) { return value; }
-function internalAlias(value) { return value; }
-export { internalAlias as aliasedConvert };
+export { internalAlias as aliasedConvert } from "./internal.js";
 `,
+		"node_modules/demo/internal.d.ts": `export declare function internalAlias(value: string): string;`,
+		"node_modules/demo/internal.js":   `export function internalAlias(value) { return value; }`,
 		"node_modules/decl-only/package.json": `{
 			"name":"decl-only",
 			"version":"4.0.0",

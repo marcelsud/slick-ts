@@ -196,17 +196,53 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
   function documentation(symbol) {
     return symbol ? ts.displayPartsToString(symbol.getDocumentationComment(checker)) : "";
   }
+  function exportedNamesFor(symbol, packageIdentity) {
+    let files;
+    if (packageIdentity) {
+      const dependency = packages.find((value) =>
+        value.identity.name === packageIdentity.name && value.identity.export === packageIdentity.export,
+      );
+      files = dependency?.declarationFile ? [sourceFile(dependency.declarationFile)] : [];
+    } else {
+      files = program.getSourceFiles().filter((file) => {
+        const relative = path.relative(projectRoot, path.resolve(file.fileName));
+        return !file.isDeclarationFile && relative !== "" && relative !== ".." &&
+          !relative.startsWith(`..${path.sep}`) && !relative.split(path.sep).includes("node_modules");
+      });
+    }
+    const names = new Set();
+    for (const file of files ?? []) {
+      if (!file?.symbol) continue;
+      for (const exported of checker.getExportsOfModule(file.symbol)) {
+        if (resolveAlias(exported) === symbol) names.add(exported.name);
+      }
+    }
+    return [...names].sort();
+  }
+
 
   function aliases(canonical, name, packageIdentity, symbol, node) {
     const qualified = canonical.includes("::") ? canonical.split("::")[1] : canonical;
     const values = new Set([canonical, qualified, name]);
-    const moduleSymbol = node.getSourceFile().symbol;
-    const publicNames = !qualified.includes(".") && moduleSymbol
-      ? checker.getExportsOfModule(moduleSymbol)
-        .filter((value) => resolveAlias(value) === symbol)
-        .map((value) => value.name)
-      : [];
+    const publicNames = !qualified.includes(".") ? exportedNamesFor(symbol, packageIdentity) : [];
     for (const publicName of publicNames) values.add(publicName);
+    let container = node.parent;
+    while (container && !ts.isSourceFile(container) &&
+      !ts.isClassDeclaration(container) && !ts.isModuleDeclaration(container)) {
+      container = container.parent;
+    }
+    if (qualified.includes(".") && container?.name) {
+      const containerSymbol = resolveAlias(checker.getSymbolAtLocation(container.name));
+      const suffix = qualified.slice(qualified.indexOf(".") + 1);
+      for (const publicName of exportedNamesFor(containerSymbol, packageIdentity)) {
+        values.add(`${publicName}.${suffix}`);
+        if (packageIdentity) {
+          const subpath = packageIdentity.export === "." ? "" : packageIdentity.export.slice(1);
+          values.add(`${packageIdentity.name}${subpath}.${publicName}.${suffix}`);
+          values.add(`${packageIdentity.name}${subpath}#${publicName}.${suffix}`);
+        }
+      }
+    }
     if (packageIdentity) {
       const subpath = packageIdentity.export === "." ? "" : packageIdentity.export.slice(1);
       values.add(`${packageIdentity.name}${subpath}.${qualified}`);
@@ -217,6 +253,15 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       }
     }
     return [...values].filter(Boolean).sort();
+  }
+
+  function declaredMembers(node) {
+    const children = ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)
+      ? node.body.statements
+      : node.members ?? [];
+    return children
+      .filter((child) => child.name)
+      .map((child) => child.name.getText(child.getSourceFile()));
   }
 
   function makeDescription(node, canonical, packageIdentity, members = []) {
@@ -237,7 +282,7 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       parameters: primary?.parameters ?? [],
       ...(primary && { return: primary.return }),
       signatures,
-      members: [...members].sort(),
+      members: [...new Set([...members, ...declaredMembers(node)])].sort(),
       ...(packageIdentity && { package: packageIdentity }),
     };
   }
@@ -323,13 +368,7 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     function visit(node) {
       if ((ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)) && node.name) {
         const canonical = containerCanonical(node);
-        const directMembers = [];
-        const children = ts.isModuleDeclaration(node) && node.body && ts.isModuleBlock(node.body)
-          ? node.body.statements
-          : node.members ?? [];
-        for (const child of children) {
-          if (child.name) directMembers.push(child.name.getText(child.getSourceFile()));
-        }
+        const directMembers = declaredMembers(node);
         const existing = byCanonical.get(canonical);
         if (existing) {
           existing.members = [...new Set([...existing.members, ...directMembers])].sort();
