@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -6,11 +7,11 @@ const configPath = path.resolve(process.env.SLICK_CONFIG_PATH);
 const projectRoot = path.dirname(configPath);
 
 function response(diagnostics = [], failure) {
-  process.stdout.write(JSON.stringify({ diagnostics, ...(failure && { failure }) }));
+  return JSON.stringify({ diagnostics, ...(failure && { failure }) });
 }
 
 function failure(kind, message, diagnostics = []) {
-  response(diagnostics, { kind, message });
+  fs.writeFileSync(1, response(diagnostics, { kind, message }));
   process.exit(0);
 }
 
@@ -84,39 +85,47 @@ function normalize(diagnostics) {
   return [...unique.values()].sort(compare);
 }
 
-const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
-if (loaded.error) {
-  failure("invalid_configuration", "TypeScript configuration is invalid", normalize([loaded.error]));
+function loadConfig(fileName) {
+  const unrecoverable = [];
+  const host = {
+    ...ts.sys,
+    onUnRecoverableConfigFileDiagnostic: (diagnostic) => unrecoverable.push(diagnostic),
+  };
+  const parsed = ts.getParsedCommandLineOfConfigFile(fileName, {}, host);
+  return {
+    parsed,
+    errors: parsed ? [...unrecoverable, ...parsed.errors] : unrecoverable,
+  };
 }
 
-const parsed = ts.parseJsonConfigFileContent(
-  loaded.config,
-  ts.sys,
-  projectRoot,
-  undefined,
-  configPath,
-);
-if (parsed.errors.length > 0) {
-  failure("invalid_configuration", "TypeScript configuration is invalid", normalize(parsed.errors));
-}
-
-const referenceDiagnostics = [];
-for (const reference of parsed.projectReferences ?? []) {
-  const referencePath = ts.resolveProjectReferencePath(reference);
-  const referenced = ts.readConfigFile(referencePath, ts.sys.readFile);
-  if (referenced.error) {
-    referenceDiagnostics.push(referenced.error);
-    continue;
-  }
-  const referencedConfig = ts.parseJsonConfigFileContent(
-    referenced.config,
-    ts.sys,
-    path.dirname(referencePath),
-    undefined,
-    referencePath,
+const rootConfig = loadConfig(configPath);
+if (!rootConfig.parsed || rootConfig.errors.length > 0) {
+  failure(
+    "invalid_configuration",
+    "TypeScript configuration is invalid",
+    normalize(rootConfig.errors),
   );
-  referenceDiagnostics.push(...referencedConfig.errors);
 }
+const parsed = rootConfig.parsed;
+
+function collectReferenceDiagnostics(commandLine, seen) {
+  const diagnostics = [];
+  for (const reference of commandLine.projectReferences ?? []) {
+    const referencePath = path.resolve(ts.resolveProjectReferencePath(reference));
+    if (seen.has(referencePath)) {
+      continue;
+    }
+    seen.add(referencePath);
+    const referenced = loadConfig(referencePath);
+    diagnostics.push(...referenced.errors);
+    if (referenced.parsed && referenced.errors.length === 0) {
+      diagnostics.push(...collectReferenceDiagnostics(referenced.parsed, seen));
+    }
+  }
+  return diagnostics;
+}
+
+const referenceDiagnostics = collectReferenceDiagnostics(parsed, new Set([configPath]));
 if (referenceDiagnostics.length > 0) {
   failure(
     "project_reference",
@@ -134,9 +143,11 @@ const diagnostics = ts.getPreEmitDiagnostics(program);
 const projectReferenceFailure = diagnostics.some(
   ({ code }) => (code >= 6305 && code <= 6312) || code === 6377 || code === 6378,
 );
-response(
-  normalize(diagnostics),
-  projectReferenceFailure
-    ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
-    : undefined,
+process.stdout.write(
+  response(
+    normalize(diagnostics),
+    projectReferenceFailure
+      ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
+      : undefined,
+  ),
 );

@@ -143,14 +143,17 @@ func TestCheckInvalidConfiguration(t *testing.T) {
 	})
 	output, _, code := runSlick(t, root, nil, "check", "--json")
 	document := decodeOutput(t, output)
-	if code != 1 || document.Error == nil || document.Error.Kind != "invalid_configuration" || len(document.Diagnostics) != 1 || document.Diagnostics[0].Code != 5024 {
+	if code != 1 || document.Error == nil || document.Error.Kind != "invalid_configuration" || len(document.Diagnostics) != 1 {
 		t.Fatalf("exit %d, output %+v", code, document)
 	}
+	assertDiagnostic(t, document.Diagnostics[0], 5024, "Compiler option 'strict' requires a value of type boolean.", "tsconfig.json", 1, 30)
 }
 
-func TestCheckProjectReferenceFailure(t *testing.T) {
-	root := project(t, `{"files":["index.ts"],"references":[{"path":"./missing"}]}`, map[string]string{
-		"index.ts": `export {};`,
+func TestCheckTransitiveProjectReferenceFailure(t *testing.T) {
+	root := project(t, `{"files":["index.ts"],"references":[{"path":"./packages/middle"}]}`, map[string]string{
+		"index.ts":                      `export {};`,
+		"packages/middle/index.ts":      `export {};`,
+		"packages/middle/tsconfig.json": `{"compilerOptions":{"composite":true},"files":["index.ts"],"references":[{"path":"../missing"}]}`,
 	})
 	output, _, code := runSlick(t, root, nil, "check", "--json")
 	document := decodeOutput(t, output)
