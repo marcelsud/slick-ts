@@ -400,6 +400,147 @@ function current(): [Date, string] { return [new Date(), Date()]; }
 	assertFactNames(t, summaryNamed(t, result.Summaries, "main.ts::current").Effects, "time")
 }
 
+func TestOperationalRecursiveAsyncCatchPreservesOnlyEscapingFacts(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"globals.d.ts": `declare const process: {
+  env: Record<string, string | undefined>;
+};`,
+		"main.ts": `declare function telemetry(event: string): Promise<void>;
+namespace Remote {
+  export class RetryableError extends Error {}
+  export class FatalError extends Error {}
+
+  export async function request(depth: number): Promise<void> {
+    if (depth === 0) {
+      await fetch("https://example.com");
+      if (Math.random() < 0.5) throw new RetryableError("retry");
+      throw new FatalError("fatal");
+    }
+    await retry(depth - 1);
+  }
+
+  export async function retry(depth: number): Promise<void> {
+    try {
+      await request(depth);
+    } catch (error) {
+      if (error instanceof RetryableError) {
+        console.log("retry handled");
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
+async function AOrchestrate(): Promise<void> {
+  process.env.REMOTE_TOKEN;
+  await Remote.retry(2);
+  await telemetry("complete");
+}
+`,
+	})
+
+	request := summaryNamed(t, result.Summaries, "main.ts::Remote.request")
+	assertFactNames(t, request.Errors, "FatalError", "RetryableError")
+	assertFactNames(t, request.Effects, "io", "network", "random")
+
+	retry := summaryNamed(t, result.Summaries, "main.ts::Remote.retry")
+	assertFactNames(t, retry.Errors, "FatalError")
+	assertFactNames(t, retry.Effects, "io", "network", "random")
+
+	orchestrate := summaryNamed(t, result.Summaries, "main.ts::AOrchestrate")
+	if orchestrate.Execution != ExecutionAsynchronous {
+		t.Fatalf("orchestrate classified %q", orchestrate.Execution)
+	}
+	assertErrorTypes(t, orchestrate.Errors, "main.ts::Remote.FatalError")
+	if orchestrate.Errors[0].Timing != ExecutionAsynchronous {
+		t.Fatalf("fatal error timing %q", orchestrate.Errors[0].Timing)
+	}
+	assertFactNames(t, orchestrate.Effects, "environment", "io", "network", "random")
+	assertProvenanceSymbols(t, orchestrate.Errors[0].Provenance, "main.ts::Remote.request")
+	if len(orchestrate.Unresolved) != 1 ||
+		orchestrate.Unresolved[0].Symbol != "telemetry" ||
+		orchestrate.Unresolved[0].Reason != "declaration_only" {
+		t.Fatalf("unexpected unresolved facts: %+v", orchestrate.Unresolved)
+	}
+	assertProvenanceSymbols(t, orchestrate.Unresolved[0].Provenance, "main.ts::AOrchestrate")
+}
+
+func TestOperationalScopedObjectComposesAllAuthorityAndErrorPaths(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"node_modules/@types/node/package.json": `{"name":"@types/node","version":"0.0.0","types":"index.d.ts"}`,
+		"node_modules/@types/node/index.d.ts":   `/// <reference path="fs.d.ts" />`,
+		"node_modules/@types/node/fs.d.ts": `declare module "node:fs" {
+  export function readFile(path: string, callback: (error: Error | null, data: string) => void): void;
+}`,
+		"globals.d.ts": `declare const process: {
+  env: Record<string, string | undefined>;
+  exit(code?: number): never;
+};`,
+		"main.ts": `import { readFile } from "node:fs";
+namespace Vault {
+  export class SetupError extends Error {}
+  export class DecodeError extends Error {}
+
+  export class Client {
+    constructor() {
+      process.env.VAULT_HOME;
+      if (Math.random() < 0) throw new SetupError("setup");
+    }
+
+    get token(): string {
+      indexedDB.open("vault");
+      const token = localStorage.getItem("token");
+      if (!token) throw new DecodeError("decode");
+      return token;
+    }
+
+    set token(value: string) {
+      console.log(value);
+    }
+
+    async load(response = fetch("https://example.com/token")): Promise<string> {
+      await response;
+      readFile("vault.json", () => {});
+      this.token = "loaded";
+      if (Date.now() < 0) process.exit(1);
+      return this.token;
+    }
+  }
+}
+
+async function runVault(): Promise<string> {
+  try {
+    const client = new Vault.Client();
+    return await client.load();
+  } catch (error) {
+    if (error instanceof Vault.SetupError) return "fallback";
+    throw error;
+  }
+}
+`,
+	})
+
+	runVault := summaryNamed(t, result.Summaries, "main.ts::runVault")
+	if runVault.Execution != ExecutionAsynchronous {
+		t.Fatalf("runVault classified %q", runVault.Execution)
+	}
+	assertFactNames(t, runVault.Errors, "DecodeError")
+	assertErrorTypes(t, runVault.Errors, "main.ts::Vault.DecodeError")
+	if runVault.Errors[0].Timing != ExecutionAsynchronous {
+		t.Fatalf("decode error timing %q", runVault.Errors[0].Timing)
+	}
+	assertFactNames(
+		t,
+		runVault.Effects,
+		"database", "environment", "filesystem", "io", "network", "process", "random", "state", "time",
+	)
+	if len(runVault.Unresolved) != 0 {
+		t.Fatalf("resolved object graph has unresolved facts: %+v", runVault.Unresolved)
+	}
+	assertProvenanceSymbols(t, runVault.Errors[0].Provenance, "main.ts::Vault.Client.get:token")
+}
+
 func analyzeOperationalFixture(t *testing.T, files map[string]string) Analysis {
 	t.Helper()
 	root := t.TempDir()
@@ -448,6 +589,17 @@ func assertErrorTypes(t *testing.T, facts []OperationalFact, expected ...string)
 	}
 	if !slices.Equal(actual, expected) {
 		t.Fatalf("error types %v, want %v", actual, expected)
+	}
+}
+
+func assertProvenanceSymbols(t *testing.T, provenance []Provenance, expected ...string) {
+	t.Helper()
+	actual := make([]string, len(provenance))
+	for index, source := range provenance {
+		actual[index] = source.Symbol
+	}
+	if !slices.Equal(actual, expected) {
+		t.Fatalf("provenance symbols %v, want %v", actual, expected)
 	}
 }
 
