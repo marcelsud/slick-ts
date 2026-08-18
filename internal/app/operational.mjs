@@ -50,8 +50,12 @@ function analyzeOperational(program, projectRoot, ts) {
   }
 
   function symbolName(node) {
-    const parts = [];
-    let current = node;
+    const ownName = bindingName(node);
+    if (!ownName) {
+      return undefined;
+    }
+    const parts = [ownName];
+    let current = node.parent;
     while (current && !ts.isSourceFile(current)) {
       if (isCallable(current)) {
         const name = bindingName(current);
@@ -69,9 +73,6 @@ function analyzeOperational(program, projectRoot, ts) {
         parts.unshift(current.name.getText(current.getSourceFile()));
       }
       current = current.parent;
-    }
-    if (parts.length === 0) {
-      return undefined;
     }
     return `${stableSourcePath(node.getSourceFile().fileName)}::${parts.join(".")}`;
   }
@@ -183,6 +184,8 @@ function analyzeOperational(program, projectRoot, ts) {
       if (callee.text === "Date" && isExternalSymbol(symbol)) return "time";
       if (callee.text === "WebSocket" && isExternalSymbol(symbol)) return "network";
     }
+    const files = declarationFiles(symbol);
+    if (files.some((fileName) => /\/(@types\/node\/)?fs(?:\/promises)?\.d\.ts$/.test(fileName))) return "filesystem";
     if (!ts.isPropertyAccessExpression(callee)) {
       return undefined;
     }
@@ -196,8 +199,6 @@ function analyzeOperational(program, projectRoot, ts) {
     if (["localStorage", "sessionStorage"].includes(receiver) && ["clear", "getItem", "key", "removeItem", "setItem"].includes(method) && receiverIsExternal(callee.expression)) return "state";
     if (receiver === "indexedDB" && ["cmp", "databases", "deleteDatabase", "open"].includes(method) && receiverIsExternal(callee.expression)) return "database";
     if (receiver === "process" && ["abort", "chdir", "exit", "kill"].includes(method) && receiverIsExternal(callee.expression)) return "process";
-    const files = declarationFiles(symbol);
-    if (files.some((fileName) => /\/(@types\/node\/)?fs(?:\/promises)?\.d\.ts$/.test(fileName))) return "filesystem";
     return undefined;
   }
 
@@ -363,10 +364,23 @@ function analyzeOperational(program, projectRoot, ts) {
     return policies;
   }
 
+  function isDeclarationOnly(declaration) {
+    if (declaration.getSourceFile().isDeclarationFile) return true;
+    if (isCallable(declaration) && !declaration.body) return true;
+    let current = declaration;
+    while (current && !ts.isSourceFile(current)) {
+      if (current.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) {
+        return true;
+      }
+      current = current.parent;
+    }
+    return false;
+  }
+
   function unresolvedCall(call, record) {
     const symbol = symbolAtCall(call);
     const declarations = symbol?.declarations ?? [];
-    const reason = declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+    const reason = declarations.length > 0 && declarations.every(isDeclarationOnly)
       ? "declaration_only"
       : "unmodeled_call";
     return {
