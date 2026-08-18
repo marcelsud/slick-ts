@@ -3,6 +3,8 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
   const records = [];
   const byDeclaration = new Map();
   const bySymbol = new Map();
+  const canonicalSymbols = new Map();
+  const pureConstructions = new Set();
   const identifiers = new Set();
   const packageBySource = new Map();
   for (const dependency of packages) {
@@ -248,6 +250,7 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
   function modeledEffect(call) {
     const callee = call.expression;
     const symbol = symbolAtCall(call);
+    if (ts.isNewExpression(call) && pureConstructions.has(symbol)) return "pure";
     if (ts.isIdentifier(callee)) {
       if (callee.text === "fetch" && isExternalSymbol(symbol)) return "network";
       if (["setTimeout", "setInterval"].includes(callee.text) && isExternalSymbol(symbol)) return "time";
@@ -304,7 +307,8 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
   }
 
   function typeIdentity(type) {
-    const symbol = type.aliasSymbol ?? type.symbol;
+    const original = type.aliasSymbol ?? type.symbol;
+    const symbol = canonicalSymbols.get(original) ?? original;
     if (!symbol) return checker.typeToString(type);
     const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
     if (declaration) {
@@ -508,6 +512,15 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
     const symbol = symbolAtCall(call);
     const declarations = symbol?.declarations ?? [];
     const dependency = packageForSymbol(symbol);
+    const imported = call.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      ts.isStringLiteral(call.arguments[0])
+      ? packages.find((value) => {
+          const name = packageNameFromSpecifier(call.arguments[0].text);
+          return value.name === name &&
+            value.exportPath === packageExportFromSpecifier(call.arguments[0].text, name);
+        })
+      : undefined;
+    const packageIdentity = dependency?.identity ?? imported?.identity ?? record.package;
     let reason;
     if (call.expression.kind === ts.SyntaxKind.ImportKeyword) {
       reason = "dynamic_import_target";
@@ -528,7 +541,7 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
       symbol: call.expression.getText(call.getSourceFile()),
       reason,
       dimensions: ["errors", "effects", "execution"],
-      ...(dependency && { package: dependency.identity }),
+      ...(packageIdentity && { package: packageIdentity }),
       provenance: provenance(record, call),
     };
   }
@@ -677,19 +690,61 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
     return symbol ? new Map(checker.getExportsOfModule(symbol).map((value) => [value.name, value])) : new Map();
   }
 
+  const pairedSymbols = new Map();
+  function pairSymbols(declaration, implementation, dependency) {
+    const declared = resolveAlias(declaration);
+    const implemented = resolveAlias(implementation);
+    const seen = pairedSymbols.get(declared) ?? new Set();
+    if (seen.has(implemented)) return;
+    seen.add(implemented);
+    pairedSymbols.set(declared, seen);
+    canonicalSymbols.set(implemented, declared);
+
+    const target = bySymbol.get(implemented) ??
+      (implemented.declarations ?? []).map((value) => byDeclaration.get(value)).find(Boolean);
+    if (target) {
+      target.package = dependency.identity;
+      bySymbol.set(declared, target);
+      for (const value of declared.declarations ?? []) {
+        if (isCallable(value)) byDeclaration.set(value, target);
+      }
+    }
+
+    for (const [declaredMembers, implementedMembers] of [
+      [declared.members, implemented.members],
+      [declared.exports, implemented.exports],
+    ]) {
+      if (!declaredMembers || !implementedMembers) continue;
+      for (const [name, member] of declaredMembers) {
+        const implementedMember = implementedMembers.get(name);
+        if (implementedMember) pairSymbols(member, implementedMember, dependency);
+      }
+    }
+
+    const declaredClasses = (declared.declarations ?? []).filter(ts.isClassDeclaration);
+    const implementedClasses = (implemented.declarations ?? []).filter(ts.isClassDeclaration);
+    for (const declaredClass of declaredClasses) {
+      const implementedClass = implementedClasses[0];
+      if (!implementedClass) continue;
+      const declaredConstructor = declaredClass.members.find(ts.isConstructorDeclaration);
+      const implementedConstructor = implementedClass.members.find(ts.isConstructorDeclaration);
+      const constructorTarget = implementedConstructor && byDeclaration.get(implementedConstructor);
+      if (declaredConstructor && constructorTarget) {
+        constructorTarget.package = dependency.identity;
+        byDeclaration.set(declaredConstructor, constructorTarget);
+        bySymbol.set(declared, constructorTarget);
+      }
+      if (!implementedConstructor) pureConstructions.add(declared);
+    }
+  }
+
   for (const dependency of packages) {
     if (!dependency.declarationFile || !dependency.implementationFile) continue;
     const declarations = exportsOf(dependency.declarationFile);
     const implementations = exportsOf(dependency.implementationFile);
     for (const [name, declaration] of declarations) {
       const implementation = implementations.get(name);
-      if (!implementation) continue;
-      const resolvedImplementation = resolveAlias(implementation);
-      const target = bySymbol.get(resolvedImplementation) ??
-        (resolvedImplementation.declarations ?? []).map((value) => byDeclaration.get(value)).find(Boolean);
-      if (!target) continue;
-      target.package = dependency.identity;
-      bySymbol.set(resolveAlias(declaration), target);
+      if (implementation) pairSymbols(declaration, implementation, dependency);
     }
   }
 
@@ -706,7 +761,14 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
     groups.set(dependency.cacheKey, group);
   }
 
-  if (groups.size > 0) fs.mkdirSync(cacheDirectory, { recursive: true });
+  let cacheWritable = true;
+  if (groups.size > 0) {
+    try {
+      fs.mkdirSync(cacheDirectory, { recursive: true });
+    } catch {
+      cacheWritable = false;
+    }
+  }
   for (const [cacheKey, group] of groups) {
     const cachePath = path.join(cacheDirectory, `${crypto.createHash("sha256").update(cacheKey).digest("hex")}.json`);
     let value;
@@ -730,7 +792,7 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
       cache.hits++;
       continue;
     }
-    group.cachePath = cachePath;
+    if (cacheWritable) group.cachePath = cachePath;
     cache.misses++;
   }
 
@@ -751,8 +813,14 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
       })),
     };
     const temporary = `${group.cachePath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(value));
-    fs.renameSync(temporary, group.cachePath);
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(value));
+      fs.renameSync(temporary, group.cachePath);
+    } catch {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {}
+    }
   }
   return { graph: records.map(({ node: _node, ...record }) => record), cache };
 }

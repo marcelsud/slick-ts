@@ -12,20 +12,38 @@ function packageExportFromSpecifier(specifier, packageName) {
 
 function runtimeImports(sourceFile, ts) {
   const imports = [];
+  function importHasRuntimeValue(node) {
+    if (!node.importClause) return true;
+    if (node.importClause.isTypeOnly) return false;
+    if (node.importClause.name) return true;
+    const bindings = node.importClause.namedBindings;
+    return !bindings || ts.isNamespaceImport(bindings) ||
+      bindings.elements.some((element) => !element.isTypeOnly);
+  }
+  function exportHasRuntimeValue(node) {
+    if (node.isTypeOnly) return false;
+    if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) return true;
+    return node.exportClause.elements.some((element) => !element.isTypeOnly);
+  }
   function visit(node) {
-    if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly && ts.isStringLiteral(node.moduleSpecifier)) {
-      imports.push({ specifier: node.moduleSpecifier.text, kind: "import" });
-    } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      imports.push({ specifier: node.moduleSpecifier.text, kind: "import" });
+    if (ts.isImportDeclaration(node) && importHasRuntimeValue(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier });
+    } else if (
+      ts.isExportDeclaration(node) &&
+      exportHasRuntimeValue(node) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier });
     } else if (
       ts.isCallExpression(node) &&
       node.arguments.length === 1 &&
       ts.isStringLiteral(node.arguments[0])
     ) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-        imports.push({ specifier: node.arguments[0].text, kind: "import" });
+        imports.push({ specifier: node.arguments[0].text, kind: "import", usage: node.arguments[0] });
       } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
-        imports.push({ specifier: node.arguments[0].text, kind: "require" });
+        imports.push({ specifier: node.arguments[0].text, kind: "require", usage: node.arguments[0] });
       }
     }
     ts.forEachChild(node, visit);
@@ -40,11 +58,35 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
   const implementationFiles = new Set();
   const pendingSources = [];
   const scannedSources = new Set();
-  const activeConditions = new Set(["node", "default", ...(parsed.options.customConditions ?? [])]);
+  const runtimeOptions = { ...parsed.options, noDtsResolution: true };
 
   function stablePath(fileName) {
     return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
   }
+  function resolutionMode(sourceFile, usage, kind) {
+    try {
+      const mode = program.getSourceFile(sourceFile.fileName)
+        ? program.getModeForUsageLocation(sourceFile, usage)
+        : ts.getModeForUsageLocation(sourceFile, usage, parsed.options);
+      if (mode !== undefined) return mode;
+      if (kind === "require") return ts.ModuleKind.CommonJS;
+      return ts.getImpliedNodeFormatForFile(sourceFile.fileName, undefined, ts.sys, parsed.options) ??
+        ts.ModuleKind.ESNext;
+    } catch {
+      return kind === "import" ? ts.ModuleKind.ESNext : ts.ModuleKind.CommonJS;
+    }
+  }
+
+  function conditionsFor(mode) {
+    const resolution = parsed.options.moduleResolution;
+    if (resolution === ts.ModuleResolutionKind.Classic || resolution === ts.ModuleResolutionKind.Node10) {
+      return [];
+    }
+    const conditions = [mode === ts.ModuleKind.ESNext ? "import" : "require"];
+    if (resolution !== ts.ModuleResolutionKind.Bundler) conditions.push("node");
+    return [...conditions, ...(parsed.options.customConditions ?? [])];
+  }
+
 
   function packageRoot(start, packageName) {
     let current = path.dirname(start);
@@ -80,20 +122,18 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     return undefined;
   }
 
-  function exportedTarget(packageJSON, exportPath, kind) {
-    const conditions = new Set(activeConditions);
-    conditions.add(kind);
+  function exportedTarget(packageJSON, exportPath, conditions) {
+    const active = new Set([...conditions, "default"]);
     const exports = packageJSON.exports;
     if (exports !== undefined) {
       const target = exports && typeof exports === "object" && !Array.isArray(exports) &&
           Object.keys(exports).some((key) => key.startsWith("."))
         ? exports[exportPath]
         : exportPath === "." ? exports : undefined;
-      return selectTarget(target, conditions);
+      return selectTarget(target, active);
     }
     if (exportPath !== ".") return undefined;
-    const target = packageJSON.main ?? "index.js";
-    return { target, conditions: ["main"] };
+    return { target: packageJSON.main ?? "index.js", conditions: ["main"] };
   }
 
   function existingSource(target) {
@@ -110,8 +150,16 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     return path.resolve(target);
   }
 
-  function declarationFor(specifier, containingFile) {
-    return ts.resolveModuleName(specifier, containingFile, parsed.options, ts.sys).resolvedModule?.resolvedFileName;
+  function resolvedModule(specifier, containingFile, options, mode) {
+    return ts.resolveModuleName(
+      specifier,
+      containingFile,
+      options,
+      ts.sys,
+      undefined,
+      undefined,
+      mode,
+    ).resolvedModule;
   }
 
   function addSource(record, fileName) {
@@ -122,11 +170,12 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     pendingSources.push({ record, fileName: resolved });
   }
 
-  function addPackage(specifier, containingFile, kind) {
+  function addPackage(specifier, containingFile, kind, mode) {
     const name = packageNameFromSpecifier(specifier);
     if (!name || name === "." || name === "..") return;
-    const declarationFile = declarationFor(specifier, containingFile);
-    let packageInfo = declarationFile ? packageRoot(declarationFile, name) : undefined;
+    const declarationFile = resolvedModule(specifier, containingFile, parsed.options, mode)?.resolvedFileName;
+    const runtimeFile = resolvedModule(specifier, containingFile, runtimeOptions, mode)?.resolvedFileName;
+    let packageInfo = packageRoot(runtimeFile ?? declarationFile ?? containingFile, name);
     if (!packageInfo) {
       try {
         const implementation = createRequire(containingFile).resolve(specifier);
@@ -136,13 +185,16 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     if (!packageInfo) return;
 
     const exportPath = packageExportFromSpecifier(specifier, name);
-    const key = `${packageInfo.root}\0${exportPath}\0${kind}`;
+    const conditions = conditionsFor(mode);
+    const key = `${packageInfo.root}\0${exportPath}\0${mode ?? "default"}`;
     const existing = recordsByKey.get(key);
     if (existing) return existing;
 
-    const selected = exportedTarget(packageInfo.value, exportPath, kind);
+    const selected = exportedTarget(packageInfo.value, exportPath, conditions);
     const unresolvedTarget = selected?.target ? path.resolve(packageInfo.root, selected.target) : undefined;
-    const implementationFile = unresolvedTarget ? existingSource(unresolvedTarget) : undefined;
+    const implementationFile = runtimeFile
+      ? path.resolve(runtimeFile)
+      : unresolvedTarget ? existingSource(unresolvedTarget) : undefined;
     const extension = implementationFile ? path.extname(implementationFile) : "";
     const sourceAvailable = implementationFile && ![".d.ts", ".d.mts", ".d.cts", ".node"].some((suffix) => implementationFile.endsWith(suffix));
     const reason = extension === ".node" ? "native_addon" : sourceAvailable ? undefined : "declaration_only";
@@ -150,7 +202,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
       name,
       version: String(packageInfo.value.version ?? "0.0.0"),
       exportPath,
-      conditions: selected?.conditions ?? [],
+      conditions: runtimeFile ? conditions : selected?.conditions ?? conditions,
       packageRoot: packageInfo.root,
       packagePath: packageInfo.path,
       declarationFile: declarationFile ? path.resolve(declarationFile) : undefined,
@@ -175,7 +227,12 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     ) continue;
     for (const imported of runtimeImports(sourceFile, ts)) {
       if (!imported.specifier.startsWith(".") && !path.isAbsolute(imported.specifier)) {
-        addPackage(imported.specifier, sourceFile.fileName, imported.kind);
+        addPackage(
+          imported.specifier,
+          sourceFile.fileName,
+          imported.kind,
+          resolutionMode(sourceFile, imported.usage, imported.kind),
+        );
       }
     }
   }
@@ -193,13 +250,14 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     }
     const sourceFile = ts.createSourceFile(fileName, source, parsed.options.target ?? ts.ScriptTarget.ES2022, true);
     for (const imported of runtimeImports(sourceFile, ts)) {
+      const mode = resolutionMode(sourceFile, imported.usage, imported.kind);
       if (imported.specifier.startsWith(".") || path.isAbsolute(imported.specifier)) {
-        try {
-          const resolved = createRequire(fileName).resolve(imported.specifier);
-          if (resolved.startsWith(record.packageRoot + path.sep)) addSource(record, resolved);
-        } catch {}
+        const resolved = resolvedModule(imported.specifier, fileName, runtimeOptions, mode)?.resolvedFileName;
+        if (resolved && path.resolve(resolved).startsWith(record.packageRoot + path.sep)) {
+          addSource(record, resolved);
+        }
       } else if (!imported.specifier.startsWith("node:")) {
-        addPackage(imported.specifier, fileName, imported.kind);
+        addPackage(imported.specifier, fileName, imported.kind, mode);
       }
     }
   }
