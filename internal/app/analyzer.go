@@ -28,8 +28,9 @@ type Failure struct {
 }
 
 type Analysis struct {
-	Diagnostics []Diagnostic `json:"diagnostics"`
-	Failure     *Failure     `json:"failure,omitempty"`
+	Diagnostics []Diagnostic         `json:"diagnostics"`
+	Summaries   []OperationalSummary `json:"summaries"`
+	Failure     *Failure             `json:"failure,omitempty"`
 }
 
 // Analyzer is the only boundary between the Go CLI and TypeScript.
