@@ -17,7 +17,7 @@ func TestNodeAnalyzerUsesTypeScriptDiagnostics(t *testing.T) {
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 
-	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil {
 		t.Fatalf("unexpected failure: %+v", result.Failure)
 	}
@@ -50,7 +50,7 @@ async function caller(): Promise<void> {
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 
-	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil || len(result.Diagnostics) != 0 {
 		t.Fatalf("analysis failed: failure=%+v diagnostics=%+v", result.Failure, result.Diagnostics)
 	}
@@ -61,6 +61,27 @@ async function caller(): Promise<void> {
 	caller := summaryNamed(t, result.Summaries, "main.ts::caller")
 	if len(caller.Errors) != 1 || caller.Errors[0].Name != "NetworkError" || len(caller.Effects) != 1 || caller.Effects[0].Name != "network" {
 		t.Fatalf("unexpected caller summary: %+v", caller)
+	}
+}
+func TestNodeAnalyzerIgnoresInheritedEmitRoot(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "tsconfig.json"), `{"compilerOptions":{"strict":true},"files":["main.ts"]}`)
+	writeTestFile(t, filepath.Join(root, "main.ts"), `export const answer: number = 42;`)
+	compiler, err := filepath.Abs(filepath.Join("..", "..", "node_modules", "typescript", "lib", "typescript.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
+	emitRoot := t.TempDir()
+	t.Setenv("SLICK_EMIT_ROOT", emitRoot)
+
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
+	if result.Failure != nil || len(result.Outputs) != 0 {
+		t.Fatalf("check inherited emit state: %+v", result)
+	}
+	entries, err := os.ReadDir(emitRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("non-build analysis emitted files: entries=%v err=%v", entries, err)
 	}
 }
 

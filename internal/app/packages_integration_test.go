@@ -196,7 +196,7 @@ func TestPackageMissingNamedExportRemainsTypeScriptDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
-	result := (NodeAnalyzer{}).Analyze(context.Background(), config)
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: config})
 	if result.Failure != nil {
 		t.Fatalf("invalid import became analyzer failure: %+v", result.Failure)
 	}
@@ -309,7 +309,7 @@ func analyzePackageFixture(t *testing.T, config string) Analysis {
 		t.Fatal(err)
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
-	result := (NodeAnalyzer{}).Analyze(context.Background(), config)
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: config})
 	if result.Failure != nil || len(result.Diagnostics) != 0 {
 		t.Fatalf("analysis failed: failure=%+v diagnostics=%+v", result.Failure, result.Diagnostics)
 	}

@@ -563,7 +563,7 @@ func analyzeOperationalFixture(t *testing.T, files map[string]string) Analysis {
 		t.Fatal(err)
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
-	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
+	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil {
 		t.Fatalf("analysis failed: failure=%+v diagnostics=%+v", result.Failure, result.Diagnostics)
 	}

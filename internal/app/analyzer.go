@@ -35,16 +35,26 @@ type CacheStats struct {
 	Hits   int `json:"hits"`
 	Misses int `json:"misses"`
 }
+type AnalyzeRequest struct {
+	Config   string
+	EmitRoot string
+}
+
+type BuildOutput struct {
+	Path   string `json:"path"`
+	Staged string `json:"staged"`
+}
 
 type Analysis struct {
 	Diagnostics  []Diagnostic         `json:"diagnostics"`
 	Summaries    []OperationalSummary `json:"summaries"`
 	Descriptions []SymbolDescription  `json:"descriptions"`
+	Outputs      []BuildOutput        `json:"outputs"`
 	Cache        CacheStats           `json:"cache"`
 	Failure      *Failure             `json:"failure,omitempty"`
 }
 
 // Analyzer is the only boundary between the Go CLI and TypeScript.
 type Analyzer interface {
-	Analyze(context.Context, string) Analysis
+	Analyze(context.Context, AnalyzeRequest) Analysis
 }

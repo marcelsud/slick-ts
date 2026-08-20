@@ -13,8 +13,8 @@ type recordingAnalyzer struct {
 	result Analysis
 }
 
-func (a *recordingAnalyzer) Analyze(_ context.Context, config string) Analysis {
-	a.config = config
+func (a *recordingAnalyzer) Analyze(_ context.Context, request AnalyzeRequest) Analysis {
+	a.config = request.Config
 	return a.result
 }
 
