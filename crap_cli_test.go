@@ -94,6 +94,74 @@ func TestCRAPCoverageLowersRiskAndMissingCoverageIsStructured(t *testing.T) {
 	if missingCode != 1 || missingErr != "" || missingDocument.Error == nil || missingDocument.Error.Kind != "coverage_failure" {
 		t.Fatalf("missing exit %d, stderr %q, output %+v", missingCode, missingErr, missingDocument)
 	}
+	source := filepath.Join(root, "src", "main.ts")
+	malformedCoverage, _ := json.Marshal(map[string]any{
+		source: map[string]any{
+			"path":         source,
+			"statementMap": map[string]any{"0": nil},
+			"s":            map[string]int{"0": 0},
+			"fnMap":        map[string]any{},
+			"f":            map[string]int{},
+		},
+	})
+	malformedPath := filepath.Join(root, "coverage", "malformed.json")
+	if err := os.WriteFile(malformedPath, malformedCoverage, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	malformed, malformedErr, malformedCode := runSlick(t, root, nil, "crap", "--json", "--coverage", malformedPath)
+	malformedDocument := decodeCRAP(t, malformed)
+	if malformedCode != 1 || malformedErr != "" || malformedDocument.Error == nil || malformedDocument.Error.Kind != "coverage_failure" {
+		t.Fatalf("malformed exit %d, stderr %q, output %+v", malformedCode, malformedErr, malformedDocument)
+	}
+
+}
+
+func TestCRAPCountsLogicalAssignments(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/main.ts": `export function assignments(first: boolean | undefined, second: boolean): boolean {
+  first &&= second;
+  first ||= second;
+  first ??= second;
+  first &&= second;
+  first ||= second;
+  return Boolean(first);
+}`,
+	})
+	coveragePath := writeCRAPCoverage(t, root, map[string]int{"0": 0, "1": 0, "2": 0, "3": 0, "4": 0})
+	output, _, code := runSlick(t, root, nil, "crap", "--json", "--coverage", coveragePath)
+	document := decodeCRAP(t, output)
+	if code != 1 || len(document.Functions) != 1 || document.Functions[0].Complexity != 6 || document.Functions[0].Score != 42 {
+		t.Fatalf("logical assignments exit %d, output %+v", code, document)
+	}
+}
+
+func TestCRAPOrderingUsesCodeUnits(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/a-b.ts": `export function dashed(): number { return 1; }`,
+		"src/a_b.ts": `export function underscored(): number { return 1; }`,
+	})
+	coverage := map[string]any{}
+	for _, name := range []string{"a-b.ts", "a_b.ts"} {
+		source := filepath.Join(root, "src", name)
+		coverage[source] = map[string]any{
+			"path":         source,
+			"statementMap": map[string]any{},
+			"s":            map[string]int{},
+			"fnMap":        map[string]any{},
+			"f":            map[string]int{},
+		}
+	}
+	content, _ := json.Marshal(coverage)
+	coveragePath := filepath.Join(root, "coverage-final.json")
+	if err := os.WriteFile(coveragePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output, _, code := runSlick(t, root, nil, "crap", "--json", "--coverage", coveragePath, "--threshold", "100")
+	document := decodeCRAP(t, output)
+	if code != 0 || len(document.Functions) != 2 ||
+		document.Functions[0].Path != "src/a-b.ts" || document.Functions[1].Path != "src/a_b.ts" {
+		t.Fatalf("ordering exit %d, output %+v", code, document)
+	}
 }
 
 func writeCRAPCoverage(t *testing.T, root string, counts map[string]int) string {

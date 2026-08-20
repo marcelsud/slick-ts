@@ -15,6 +15,52 @@ function analyzeCrap(program, projectRoot, ts, graph, coveragePath) {
   if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) {
     return { results: [], failure: { kind: "coverage_failure", message: "coverage document must be an object" } };
   }
+  function record(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function point(value) {
+    return record(value) && Number.isInteger(value.line) && value.line >= 1 &&
+      Number.isInteger(value.column) && value.column >= 0;
+  }
+
+  function location(value) {
+    return record(value) && point(value.start) && point(value.end);
+  }
+
+  function counter(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  }
+
+  function validateFileCoverage(name, value) {
+    if (!record(value)) return `${name} must be an object`;
+    if (value.path !== undefined && typeof value.path !== "string") return `${name}.path must be a string`;
+    if (!record(value.statementMap) || !record(value.s)) {
+      return `${name}.statementMap and ${name}.s must be objects`;
+    }
+    for (const [identifier, entry] of Object.entries(value.statementMap)) {
+      if (!location(entry)) return `${name}.statementMap.${identifier} has an invalid location`;
+      if (!counter(value.s[identifier])) return `${name}.s.${identifier} must be a non-negative number`;
+    }
+    if (!record(value.fnMap) || !record(value.f)) {
+      return `${name}.fnMap and ${name}.f must be objects`;
+    }
+    for (const [identifier, entry] of Object.entries(value.fnMap)) {
+      if (!record(entry) || !location(entry.loc ?? entry.decl)) {
+        return `${name}.fnMap.${identifier} has an invalid location`;
+      }
+      if (!counter(value.f[identifier])) return `${name}.f.${identifier} must be a non-negative number`;
+    }
+    return undefined;
+  }
+
+  for (const [name, value] of Object.entries(coverage)) {
+    const invalid = validateFileCoverage(name, value);
+    if (invalid) {
+      return { results: [], failure: { kind: "coverage_failure", message: invalid } };
+    }
+  }
+
 
   function stablePath(fileName) {
     return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
@@ -64,6 +110,9 @@ function analyzeCrap(program, projectRoot, ts, graph, coveragePath) {
           ts.SyntaxKind.AmpersandAmpersandToken,
           ts.SyntaxKind.BarBarToken,
           ts.SyntaxKind.QuestionQuestionToken,
+          ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+          ts.SyntaxKind.BarBarEqualsToken,
+          ts.SyntaxKind.QuestionQuestionEqualsToken,
         ].includes(node.operatorToken.kind)
       ) {
         complexity++;
@@ -196,7 +245,10 @@ function analyzeCrap(program, projectRoot, ts, graph, coveragePath) {
       });
     }
   }
-  results.sort((left, right) => left.path.localeCompare(right.path) ||
-    left.range.start.offset - right.range.start.offset || left.symbol.localeCompare(right.symbol));
+  results.sort((left, right) => {
+    const pathOrder = left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+    const symbolOrder = left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0;
+    return pathOrder || left.range.start.offset - right.range.start.offset || symbolOrder;
+  });
   return { results };
 }
