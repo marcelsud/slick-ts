@@ -66,6 +66,7 @@ type SymbolContract struct {
 	Effects      []OperationalFact `json:"effects"`
 	Completeness string            `json:"completeness"`
 	Unresolved   []UnresolvedLeaf  `json:"unresolved"`
+	Bounds       *BoundResult      `json:"bounds,omitempty"`
 }
 
 func contractFor(description SymbolDescription, summaries []OperationalSummary) SymbolContract {

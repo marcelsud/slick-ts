@@ -90,7 +90,17 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       };
     }
     const typeArguments = type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : [];
-    const properties = depth < 2 && (!symbol || symbol.name === "__type") ? checker.getPropertiesOfType(type).map((property) => {
+    const expandProperties = !symbol || symbol.name === "__type" ||
+      (symbol.declarations ?? []).some((declaration) => {
+        const fileName = path.resolve(declaration.getSourceFile().fileName);
+        const relative = path.relative(projectRoot, fileName);
+        const authored = !declaration.getSourceFile().isDeclarationFile && relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+        return authored && (ts.isInterfaceDeclaration(declaration) ||
+          ts.isClassDeclaration(declaration) && !declaration.members.some((member) =>
+            member.name && ts.isPrivateIdentifier(member.name) ||
+            member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword)));
+      });
+    const properties = depth < 2 && expandProperties ? checker.getPropertiesOfType(type).map((property) => {
       const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? location;
       return {
         name: property.name,

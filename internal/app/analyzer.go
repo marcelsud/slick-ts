@@ -36,9 +36,23 @@ type CacheStats struct {
 	Misses int `json:"misses"`
 }
 type AnalyzeRequest struct {
-	Config       string
-	EmitRoot     string
-	CoveragePath string
+	Config              string
+	EmitRoot            string
+	CoveragePath        string
+	CoverageQuality     bool
+	Artifacts           bool
+	DeadCode            bool
+	Entries             []string
+	Architecture        bool
+	ArchitectureConfig  string
+	Duplication         bool
+	MinCloneNodes       int
+	MinCloneOccurrences int
+	Maintainability     bool
+	Risk                bool
+	Mutation            bool
+	Bounds              bool
+	BoundsConfig        string
 }
 
 type BuildOutput struct {
@@ -47,13 +61,23 @@ type BuildOutput struct {
 }
 
 type Analysis struct {
-	Diagnostics  []Diagnostic         `json:"diagnostics"`
-	Summaries    []OperationalSummary `json:"summaries"`
-	Descriptions []SymbolDescription  `json:"descriptions"`
-	Outputs      []BuildOutput        `json:"outputs"`
-	CRAP         []CRAPResult         `json:"crap"`
-	Cache        CacheStats           `json:"cache"`
-	Failure      *Failure             `json:"failure,omitempty"`
+	Diagnostics     []Diagnostic            `json:"diagnostics"`
+	Summaries       []OperationalSummary    `json:"summaries"`
+	Descriptions    []SymbolDescription     `json:"descriptions"`
+	Outputs         []BuildOutput           `json:"outputs"`
+	CRAP            []CRAPResult            `json:"crap"`
+	Complexity      []ComplexityResult      `json:"complexity"`
+	Coverage        *CoverageReport         `json:"coverageReport,omitempty"`
+	Artifacts       *ArtifactReport         `json:"artifacts,omitempty"`
+	DeadCode        *DeadCodeReport         `json:"deadCode,omitempty"`
+	Architecture    *ArchitectureReport     `json:"architecture,omitempty"`
+	Duplication     *DuplicationReport      `json:"duplication,omitempty"`
+	Maintainability []MaintainabilityResult `json:"maintainability"`
+	RiskInputs      []RiskInput             `json:"riskInputs"`
+	Mutants         []MutationCandidate     `json:"mutants"`
+	Bounds          *BoundsReport           `json:"bounds,omitempty"`
+	Cache           CacheStats              `json:"cache"`
+	Failure         *Failure                `json:"failure,omitempty"`
 }
 
 // Analyzer is the only boundary between the Go CLI and TypeScript.
