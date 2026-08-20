@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -127,7 +130,7 @@ func apiEntryPaths(projectRoot string, descriptions []SymbolDescription) map[str
 	return result
 }
 
-func diffAPI(oldSnapshot, current APISnapshot) []APIChange {
+func diffAPI(oldSnapshot, current APISnapshot, assignable func(TypeDescription, TypeDescription) bool) []APIChange {
 	changes := []APIChange{}
 	oldByName := map[string]SymbolContract{}
 	newByName := map[string]SymbolContract{}
@@ -159,7 +162,7 @@ func diffAPI(oldSnapshot, current APISnapshot) []APIChange {
 				changes = append(changes, APIChange{Symbol: name, Kind: "removed_alias", Breaking: true, Detail: alias})
 			}
 		}
-		changes = append(changes, signatureChanges(name, oldContract, newContract)...)
+		changes = append(changes, signatureChanges(name, oldContract, newContract, assignable)...)
 		changes = append(changes, addedFactChanges(name, "error", oldContract.Errors, newContract.Errors)...)
 		changes = append(changes, addedFactChanges(name, "effect", oldContract.Effects, newContract.Effects)...)
 		if oldContract.Completeness == "complete" && newContract.Completeness == "partial" {
@@ -213,7 +216,7 @@ func visibilityRank(value string) int {
 	}
 }
 
-func signatureChanges(symbol string, oldContract, newContract SymbolContract) []APIChange {
+func signatureChanges(symbol string, oldContract, newContract SymbolContract, assignable func(TypeDescription, TypeDescription) bool) []APIChange {
 	changes := []APIChange{}
 	oldSignatures := oldContract.Signatures
 	newSignatures := newContract.Signatures
@@ -227,7 +230,7 @@ func signatureChanges(symbol string, oldContract, newContract SymbolContract) []
 		compatible := false
 		var matched SignatureDescription
 		for _, newSignature := range newSignatures {
-			if signatureCompatible(oldSignature, newSignature) {
+			if signatureCompatible(oldSignature, newSignature, assignable) {
 				compatible = true
 				matched = newSignature
 				break
@@ -247,17 +250,23 @@ func signatureChanges(symbol string, oldContract, newContract SymbolContract) []
 	return changes
 }
 
-func signatureCompatible(oldSignature, newSignature SignatureDescription) bool {
+func signatureCompatible(oldSignature, newSignature SignatureDescription, assignable func(TypeDescription, TypeDescription) bool) bool {
 	if len(oldSignature.TypeParameters) != len(newSignature.TypeParameters) {
 		return false
 	}
 	for index := range oldSignature.TypeParameters {
 		oldParameter, newParameter := oldSignature.TypeParameters[index], newSignature.TypeParameters[index]
-		oldConstraint, _ := json.Marshal(oldParameter.Constraint)
-		newConstraint, _ := json.Marshal(newParameter.Constraint)
-		oldDefault, _ := json.Marshal(oldParameter.Default)
-		newDefault, _ := json.Marshal(newParameter.Default)
-		if string(oldConstraint) != string(newConstraint) || string(oldDefault) != string(newDefault) {
+		if oldParameter.Constraint == nil && newParameter.Constraint != nil {
+			return false
+		}
+		if oldParameter.Constraint != nil && newParameter.Constraint != nil &&
+			!assignable(*newParameter.Constraint, *oldParameter.Constraint) {
+			return false
+		}
+		if oldParameter.Default == nil != (newParameter.Default == nil) {
+			return false
+		}
+		if oldParameter.Default != nil && !assignable(*oldParameter.Default, *newParameter.Default) {
 			return false
 		}
 	}
@@ -267,11 +276,11 @@ func signatureCompatible(oldSignature, newSignature SignatureDescription) bool {
 		return false
 	}
 	for index := 0; index < len(oldSignature.Parameters) && index < len(newSignature.Parameters); index++ {
-		if !typeAccepts(newSignature.Parameters[index].Type, oldSignature.Parameters[index].Type) {
+		if !assignable(newSignature.Parameters[index].Type, oldSignature.Parameters[index].Type) {
 			return false
 		}
 	}
-	return typeAccepts(oldSignature.Return, newSignature.Return)
+	return assignable(oldSignature.Return, newSignature.Return)
 }
 
 func requiredParameters(values []ParameterDescription) int {
@@ -378,4 +387,154 @@ func addedFactChanges(symbol, kind string, oldFacts, newFacts []OperationalFact)
 		}
 	}
 	return changes
+}
+
+type tsTypeAssigner struct {
+	ctx    context.Context
+	config string
+	cache  map[string]bool
+	err    error
+}
+
+const apiAssignabilityScript = `
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+const config = path.resolve(process.argv[1]);
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const require = createRequire(config);
+const compilerPath = process.env.SLICK_TYPESCRIPT_PATH
+  ? path.resolve(process.env.SLICK_TYPESCRIPT_PATH)
+  : require.resolve("typescript", { paths: [path.dirname(config)] });
+const ts = require(compilerPath);
+const options = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, skipLibCheck: true };
+const fileName = path.join(path.dirname(config), ".slick-api-assignability.ts");
+const source = "type Target = " + input.target + ";\ntype Value = " + input.value + ";\ndeclare const value: Value;\nconst check: Target = value;\n";
+const host = ts.createCompilerHost(options);
+const originalGetSourceFile = host.getSourceFile;
+host.fileExists = (name) => path.resolve(name) === path.resolve(fileName) || ts.sys.fileExists(name);
+host.readFile = (name) => path.resolve(name) === path.resolve(fileName) ? source : ts.sys.readFile(name);
+host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) =>
+  path.resolve(name) === path.resolve(fileName)
+    ? ts.createSourceFile(fileName, source, languageVersion, true)
+    : originalGetSourceFile(name, languageVersion, onError, shouldCreateNewSourceFile);
+const program = ts.createProgram([fileName], options, host);
+const failed = ts.getPreEmitDiagnostics(program).some((diagnostic) =>
+  diagnostic.category === ts.DiagnosticCategory.Error &&
+  diagnostic.file && path.resolve(diagnostic.file.fileName) === path.resolve(fileName));
+process.stdout.write(failed ? "false" : "true");
+`
+
+func newTSTypeAssigner(ctx context.Context, config string) *tsTypeAssigner {
+	return &tsTypeAssigner{ctx: ctx, config: config, cache: map[string]bool{}}
+}
+
+func (assigner *tsTypeAssigner) assignable(target, value TypeDescription) bool {
+	if assigner.err != nil {
+		return false
+	}
+	targetSource, valueSource := renderTypeScriptType(target), renderTypeScriptType(value)
+	key := targetSource + "\x00" + valueSource
+	if result, ok := assigner.cache[key]; ok {
+		return result
+	}
+	input, _ := json.Marshal(map[string]string{"target": targetSource, "value": valueSource})
+	node, err := exec.LookPath("node")
+	if err != nil {
+		assigner.err = err
+		return false
+	}
+	command := exec.CommandContext(assigner.ctx, node, "--input-type=module", "--eval", apiAssignabilityScript, assigner.config)
+	command.Stdin = bytes.NewReader(input)
+	command.Env = os.Environ()
+	output, err := command.CombinedOutput()
+	if err != nil {
+		assigner.err = fmt.Errorf("TypeScript assignability: %w: %s", err, strings.TrimSpace(string(output)))
+		return false
+	}
+	result := strings.TrimSpace(string(output)) == "true"
+	assigner.cache[key] = result
+	return result
+}
+
+func renderTypeScriptType(value TypeDescription) string {
+	switch value.Kind {
+	case "primitive":
+		if value.Name == "" {
+			return "unknown"
+		}
+		return value.Name
+	case "literal":
+		if value.Name == "string" {
+			encoded, _ := json.Marshal(value.Value)
+			return string(encoded)
+		}
+		if value.Value == "" {
+			return value.Name
+		}
+		return value.Value
+	case "union":
+		parts := make([]string, len(value.Members))
+		for index, member := range value.Members {
+			parts[index] = renderTypeScriptType(member)
+		}
+		return "(" + strings.Join(parts, " | ") + ")"
+	case "intersection":
+		parts := make([]string, len(value.Members))
+		for index, member := range value.Members {
+			parts[index] = renderTypeScriptType(member)
+		}
+		return "(" + strings.Join(parts, " & ") + ")"
+	case "array":
+		if value.Element == nil {
+			return "unknown[]"
+		}
+		return "Array<" + renderTypeScriptType(*value.Element) + ">"
+	case "tuple":
+		parts := make([]string, len(value.Elements))
+		for index, element := range value.Elements {
+			parts[index] = renderTypeScriptType(element)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case "object":
+		properties := make([]string, len(value.Properties))
+		for index, property := range value.Properties {
+			encoded, _ := json.Marshal(property.Name)
+			optional := ""
+			if property.Optional {
+				optional = "?"
+			}
+			properties[index] = string(encoded) + optional + ": " + renderTypeScriptType(property.Type)
+		}
+		return "{ " + strings.Join(properties, "; ") + " }"
+	case "callable":
+		parameters := make([]string, len(value.Parameters))
+		for index, parameter := range value.Parameters {
+			optional := ""
+			if parameter.Optional {
+				optional = "?"
+			}
+			parameters[index] = fmt.Sprintf("p%d%s: %s", index, optional, renderTypeScriptType(parameter.Type))
+		}
+		return "((" + strings.Join(parameters, ", ") + ") => " + func() string {
+			if value.Return == nil {
+				return "unknown"
+			}
+			return renderTypeScriptType(*value.Return)
+		}() + ")"
+	case "reference":
+		if value.Name == "" || strings.ContainsAny(value.Name, "\"' ") {
+			return "unknown"
+		}
+		if len(value.Arguments) == 0 {
+			return value.Name
+		}
+		arguments := make([]string, len(value.Arguments))
+		for index, argument := range value.Arguments {
+			arguments[index] = renderTypeScriptType(argument)
+		}
+		return value.Name + "<" + strings.Join(arguments, ", ") + ">"
+	default:
+		return "unknown"
+	}
 }

@@ -763,15 +763,20 @@ func runAPI(ctx context.Context, args []string, stdout, stderr io.Writer, analyz
 					}
 					doc.Error = &Failure{Kind: "api_baseline_failure", Message: err.Error()}
 				} else {
-					changes := diffAPI(baseline, snapshot)
-					doc.API = &snapshot
-					doc.Changes = changes
-					doc.Baseline = filepath.ToSlash(*baselinePath)
-					doc.Success = true
-					for _, change := range changes {
-						if change.Breaking {
-							doc.Success = false
-							break
+					assigner := newTSTypeAssigner(ctx, config)
+					changes := diffAPI(baseline, snapshot, assigner.assignable)
+					if assigner.err != nil {
+						doc.Error = &Failure{Kind: "api_diff_failure", Message: assigner.err.Error()}
+					} else {
+						doc.API = &snapshot
+						doc.Changes = changes
+						doc.Baseline = filepath.ToSlash(*baselinePath)
+						doc.Success = true
+						for _, change := range changes {
+							if change.Breaking {
+								doc.Success = false
+								break
+							}
 						}
 					}
 				}

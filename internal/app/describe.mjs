@@ -91,7 +91,11 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
     }
     const typeArguments = type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : [];
     const expandProperties = !symbol || symbol.name === "__type" ||
-      (symbol.declarations ?? []).some((declaration) => ts.isInterfaceDeclaration(declaration) || ts.isTypeLiteralNode(declaration));
+      (symbol.declarations ?? []).some((declaration) =>
+        ts.isInterfaceDeclaration(declaration) || ts.isTypeLiteralNode(declaration) ||
+        ts.isClassDeclaration(declaration) && !declaration.members.some((member) =>
+          member.name && ts.isPrivateIdentifier(member.name) ||
+          member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword || modifier.kind === ts.SyntaxKind.ProtectedKeyword)));
     const properties = depth < 2 && expandProperties ? checker.getPropertiesOfType(type).map((property) => {
       const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? location;
       return {

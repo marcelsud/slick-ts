@@ -357,6 +357,7 @@ Structured failures use these `error.kind` values.
 - `coverage_failure`
 - `api_snapshot_failure`
 - `api_baseline_failure`
+- `api_diff_failure`
 - `git_failure`
 - `risk_configuration`
 - `mutation_failure`

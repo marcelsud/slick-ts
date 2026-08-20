@@ -138,20 +138,24 @@ func TestAPISnapshotScopesDefaultExportsToPackageEntry(t *testing.T) {
 
 func TestAPIDiffUsesStructuralAssignabilityAndReportsCompatibleChanges(t *testing.T) {
 	root := apiProject(t, `interface First { value: string }
-export function use(value: First): string | number { return value.value; }`)
+export function use(value: First): string | number { return value.value; }
+export function generic<T extends "a">(value: T): T { return value; }`)
 	_, _, code := runSlick(t, root, nil, "api", "snapshot")
 	if code != 0 {
 		t.Fatal("snapshot failed")
 	}
 	writeFile(t, filepath.Join(root, "src", "index.ts"), `interface Second { value: string }
-export function use(value: Second): string { return value.value; }`)
+export function use(value: Second): string { return value.value; }
+export function generic<T extends string>(value: T): T { return value; }`)
 	output, stderr, diffCode := runSlick(t, root, nil, "api", "diff", "--json")
 	document := decodeAPI(t, output)
-	if diffCode != 0 || stderr != "" || !document.Success || len(document.Changes) != 1 || document.Changes[0].Kind != "compatible_signature_change" || document.Changes[0].Breaking {
+	if diffCode != 0 || stderr != "" || !document.Success || len(document.Changes) != 2 {
 		t.Fatalf("exit %d, stderr %q, output %+v", diffCode, stderr, document)
 	}
-	if document.Changes[0].Old == nil || document.Changes[0].New == nil || document.Changes[0].Location == nil {
-		t.Fatalf("missing change evidence: %+v", document.Changes[0])
+	for _, change := range document.Changes {
+		if change.Kind != "compatible_signature_change" || change.Breaking || change.Old == nil || change.New == nil || change.Location == nil {
+			t.Fatalf("invalid compatible change: %+v", change)
+		}
 	}
 }
 
