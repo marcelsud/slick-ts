@@ -58,6 +58,15 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
   function sortTypes(values) {
     return values.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   }
+  function typeName(type, symbol) {
+    if (!symbol) return type.intrinsicName ?? (type.flags & ts.TypeFlags.Object ? "object" : `type:${type.flags}`);
+    try {
+      return checker.getFullyQualifiedName(symbol).replace(/^".*"\./, "");
+    } catch {
+      return symbol.getName();
+    }
+  }
+
 
   function typeDescription(type, location, depth = 0, seen = new Set()) {
     const primitive = primitiveName(type);
@@ -65,20 +74,20 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       return { kind: "literal", name: primitive, value: String(type.value ?? (type.intrinsicName ?? "")) };
     }
     if (primitive) return { kind: "primitive", name: primitive };
-    if (type.isUnion?.()) return { kind: "union", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, seen))) };
-    if (type.isIntersection?.()) return { kind: "intersection", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, seen))) };
-    if (checker.isArrayType(type)) {
-      const element = checker.getTypeArguments(type)[0] ?? checker.getAnyType();
-      return { kind: "array", element: typeDescription(element, location, depth + 1, seen) };
-    }
-    if (checker.isTupleType(type)) {
-      return { kind: "tuple", elements: checker.getTypeArguments(type).map((value) => typeDescription(value, location, depth + 1, seen)) };
-    }
     const symbol = type.aliasSymbol ?? type.symbol;
-    const name = symbol ? checker.getFullyQualifiedName(symbol).replace(/^".*"\./, "") : checker.typeToString(type);
+    const name = typeName(type, symbol);
     if (depth >= 4 || seen.has(type)) return { kind: "reference", name };
     const nextSeen = new Set(seen);
     nextSeen.add(type);
+    if (type.isUnion?.()) return { kind: "union", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, nextSeen))) };
+    if (type.isIntersection?.()) return { kind: "intersection", members: sortTypes(type.types.map((value) => typeDescription(value, location, depth + 1, nextSeen))) };
+    if (checker.isArrayType(type)) {
+      const element = checker.getTypeArguments(type)[0] ?? checker.getAnyType();
+      return { kind: "array", element: typeDescription(element, location, depth + 1, nextSeen) };
+    }
+    if (checker.isTupleType(type)) {
+      return { kind: "tuple", elements: checker.getTypeArguments(type).map((value) => typeDescription(value, location, depth + 1, nextSeen)) };
+    }
     if (type.flags & ts.TypeFlags.TypeParameter) return { kind: "type_parameter", name };
     const signatures = checker.getSignaturesOfType(type, ts.SignatureKind.Call);
     if (signatures.length > 0) {
@@ -133,7 +142,7 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
 
   function typeParameters(signature, location) {
     return (signature.typeParameters ?? []).map((parameter) => ({
-      name: parameter.symbol?.name ?? checker.typeToString(parameter),
+      name: parameter.symbol?.name ?? "T",
       ...(parameter.getConstraint() && { constraint: typeDescription(parameter.getConstraint(), location) }),
       ...(parameter.getDefault() && { default: typeDescription(parameter.getDefault(), location) }),
     }));

@@ -82,12 +82,14 @@ function collectComplexity(program, projectRoot, ts, graph) {
         const start = node.body.getStart(sourceFile);
         const end = node.body.getEnd();
         const position = sourceFile.getLineAndCharacterOfPosition(range.start.offset);
+        const mapped = graphByLocation.get(locationKey);
         functions.push({
           node,
           start,
           end,
-          symbol: graphByLocation.get(locationKey) ??
-            `${stablePath(sourceFile.fileName)}::anonymous@${position.line + 1}:${position.character + 1}`,
+          symbol: mapped && !mapped.includes("callback:")
+            ? mapped
+            : `${stablePath(sourceFile.fileName)}::anonymous@${position.line + 1}:${position.character + 1}`,
           path: stablePath(sourceFile.fileName),
           range,
           complexity: complexityOf(node),

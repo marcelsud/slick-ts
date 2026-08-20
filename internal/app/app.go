@@ -167,7 +167,7 @@ func runDescribe(ctx context.Context, args []string, stdout, stderr io.Writer, a
 
 	boundsConfig := filepath.Join(filepath.Dir(config), "slick.contracts.json")
 	_, boundsErr := os.Stat(boundsConfig)
-	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config, Bounds: boundsErr == nil, BoundsConfig: boundsConfig})
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config, NeedDescriptions: true, Bounds: boundsErr == nil, BoundsConfig: boundsConfig})
 	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
 		return 130
 	}
@@ -328,9 +328,9 @@ func runCRAP(ctx context.Context, args []string, stdout, stderr io.Writer, analy
 		Coverage:    filepath.ToSlash(displayCoverage),
 		Error:       analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+	if analysis.Failure == nil {
 		doc.Functions = analysis.CRAP
-		doc.Success = len(failingCRAP(analysis.CRAP, *threshold)) == 0
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(failingCRAP(analysis.CRAP, *threshold)) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -379,13 +379,13 @@ func runComplexity(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Threshold:   float64(*threshold),
 		Error:       analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+	if analysis.Failure == nil {
 		functions := analysis.Complexity
 		if functions == nil {
 			functions = []ComplexityResult{}
 		}
 		doc.Functions = functions
-		doc.Success = len(failingComplexity(functions, *threshold)) == 0
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(failingComplexity(functions, *threshold)) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -465,14 +465,14 @@ func runCoverage(ctx context.Context, args []string, stdout, stderr io.Writer, a
 		UncoveredComplexityThreshold: *uncoveredThreshold,
 		Error:                        analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) && analysis.Coverage != nil {
+	if analysis.Failure == nil && analysis.Coverage != nil {
 		summary := summarizeCoverage(*analysis.Coverage, changed)
 		doc.CoverageSummary = &summary
 		doc.Files = analysis.Coverage.Files
 		functions := append([]CoverageFunction(nil), analysis.Coverage.Functions...)
 		sortCoverageFunctions(functions)
 		doc.Functions = functions
-		passed := summary.BranchPercent >= *branchThreshold && summary.ChangedLinePercent >= *changedThreshold
+		passed := !hasErrors(analysis.Diagnostics) && summary.BranchPercent >= *branchThreshold && summary.ChangedLinePercent >= *changedThreshold
 		for _, file := range analysis.Coverage.Files {
 			if file.State == "missing" ||
 				file.BranchTotal > 0 && percent(file.BranchCovered, file.BranchTotal) < *branchThreshold {
@@ -634,8 +634,8 @@ func runDeadCode(ctx context.Context, args []string, stdout, stderr io.Writer, a
 		DeadCode:    analysis.DeadCode,
 		Error:       analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) && analysis.DeadCode != nil {
-		doc.Success = len(analysis.DeadCode.Unreachable) == 0 && len(analysis.DeadCode.Unknown) == 0
+	if analysis.Failure == nil && analysis.DeadCode != nil {
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(analysis.DeadCode.Unreachable) == 0 && len(analysis.DeadCode.Unknown) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -681,8 +681,8 @@ func runArchitecture(ctx context.Context, args []string, stdout, stderr io.Write
 		Architecture: analysis.Architecture,
 		Error:        analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) && analysis.Architecture != nil {
-		doc.Success = len(analysis.Architecture.Violations) == 0 && len(analysis.Architecture.Cycles) == 0 && len(analysis.Architecture.Unresolved) == 0
+	if analysis.Failure == nil && analysis.Architecture != nil {
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(analysis.Architecture.Violations) == 0 && len(analysis.Architecture.Cycles) == 0 && len(analysis.Architecture.Unresolved) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -720,7 +720,7 @@ func runAPI(ctx context.Context, args []string, stdout, stderr io.Writer, analyz
 		writeDocument(stdout, stderr, doc, *jsonOutput)
 		return 1
 	}
-	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config})
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config, NeedDescriptions: true})
 	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
 		return 130
 	}
@@ -731,7 +731,7 @@ func runAPI(ctx context.Context, args []string, stdout, stderr io.Writer, analyz
 		Diagnostics: analysis.Diagnostics,
 		Error:       analysis.Failure,
 	}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+	if analysis.Failure == nil && !hasErrorsFrom(analysis.Diagnostics, "typescript") {
 		snapshot, snapshotErr := buildAPISnapshot(analysis, entries, filepath.Dir(config))
 		if snapshotErr != nil {
 			doc.Error = &Failure{Kind: "api_snapshot_failure", Message: snapshotErr.Error()}
@@ -840,8 +840,8 @@ func runDuplication(ctx context.Context, args []string, stdout, stderr io.Writer
 		return 130
 	}
 	doc := Document{Version: documentVersion, Command: "duplication", Project: "tsconfig.json", Diagnostics: analysis.Diagnostics, Duplication: analysis.Duplication, Error: analysis.Failure}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) && analysis.Duplication != nil {
-		doc.Success = len(analysis.Duplication.Clones) == 0
+	if analysis.Failure == nil && analysis.Duplication != nil {
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(analysis.Duplication.Clones) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -876,8 +876,8 @@ func runMaintainability(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 130
 	}
 	doc := Document{Version: documentVersion, Command: "maintainability", Project: "tsconfig.json", Diagnostics: analysis.Diagnostics, Threshold: *threshold, Functions: analysis.Maintainability, Error: analysis.Failure}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
-		doc.Success = len(failingMaintainability(analysis.Maintainability, *threshold)) == 0
+	if analysis.Failure == nil {
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(failingMaintainability(analysis.Maintainability, *threshold)) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -941,7 +941,7 @@ func runRisk(ctx context.Context, args []string, stdout, stderr io.Writer, analy
 	shallow := shallowErr == nil && strings.TrimSpace(string(shallowOutput)) == "true"
 	results := []RiskResult{}
 	historyByPath := map[string]historyStats{}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+	if analysis.Failure == nil {
 		for _, input := range analysis.RiskInputs {
 			changedFile := changed[input.Path]
 			changedCount := 0
@@ -977,8 +977,8 @@ func runRisk(ctx context.Context, args []string, stdout, stderr io.Writer, analy
 	}
 	report := &RiskReport{Base: *base, History: *historyWindow, Threshold: riskSettings.Threshold, Weights: riskSettings.Weights, Results: results}
 	doc := Document{Version: documentVersion, Command: "risk", Project: "tsconfig.json", Diagnostics: analysis.Diagnostics, Risk: report, Error: analysis.Failure}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
-		doc.Success = true
+	if analysis.Failure == nil {
+		doc.Success = !hasErrors(analysis.Diagnostics)
 		if riskSettings.Threshold > 0 {
 			for _, result := range results {
 				if result.Score > riskSettings.Threshold {
@@ -1166,8 +1166,8 @@ func runBounds(ctx context.Context, args []string, stdout, stderr io.Writer, ana
 		return 130
 	}
 	doc := Document{Version: documentVersion, Command: "bounds", Project: "tsconfig.json", Diagnostics: analysis.Diagnostics, Bounds: analysis.Bounds, Error: analysis.Failure}
-	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) && analysis.Bounds != nil {
-		doc.Success = len(analysis.Bounds.Violations) == 0
+	if analysis.Failure == nil && analysis.Bounds != nil {
+		doc.Success = !hasErrors(analysis.Diagnostics) && len(analysis.Bounds.Violations) == 0
 		for _, result := range analysis.Bounds.Results {
 			if len(result.Unknown) > 0 {
 				doc.Success = false
@@ -1404,6 +1404,15 @@ func findConfig(path string) (string, error) {
 func hasErrors(diagnostics []Diagnostic) bool {
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Category == "error" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasErrorsFrom(diagnostics []Diagnostic, source string) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Source == source && diagnostic.Category == "error" {
 			return true
 		}
 	}

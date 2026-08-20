@@ -256,6 +256,30 @@ export function simple(): number { return 1; }
 	}
 }
 
+func TestComplexityReportsMetricsAlongsideOperationalDiagnostics(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/main.ts": `export function flagged(value: any): number { if (value) return 1; return 0; }`,
+	})
+	output, stderr, code := runSlick(t, root, nil, "complexity", "--json", "--threshold", "100")
+	document := decodeComplexity(t, output)
+	if code != 1 || stderr != "" || document.Success || len(document.Diagnostics) == 0 || len(document.Functions) != 1 || document.Functions[0].Complexity != 2 {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
+func TestComplexityKeepsTopLevelCallbacksAnonymous(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/main.ts": `declare function test(name: string, callback: () => void): void;
+test("one", () => { if (Date.now() > 0) return; });`,
+	})
+	output, stderr, code := runSlick(t, root, nil, "complexity", "--json", "--threshold", "100")
+	document := decodeComplexity(t, output)
+	if code != 0 || stderr != "" || !document.Success || len(document.Functions) != 1 ||
+		!strings.Contains(document.Functions[0].Symbol, "::anonymous@") || strings.Contains(document.Functions[0].Symbol, "callback:") {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
 func TestComplexityReportsStructuredFailures(t *testing.T) {
 	missing, missingErr, missingCode := runSlick(t, t.TempDir(), nil, "complexity", "--json")
 	missingDocument := decodeComplexityFailure(t, missing)

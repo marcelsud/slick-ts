@@ -37,6 +37,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     }
     limits.set(candidates[0], bounds);
   }
+  if (limits.size === 0) return { report: { results: [], violations: [] } };
 
   const graphByName = new Map(graph.map((node) => [node.symbol, node]));
   const graphByLocation = new Map(graph.map((node) => [`${node.location.path}\0${node.location.range.start.offset}`, node.symbol]));
@@ -74,6 +75,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
   function empty() { return { bounds: { timeoutMs: 0, maxAttempts: 0, maxItems: 0, maxConcurrency: 0 }, unknown: [] }; }
   function sequential(left, right, node) {
     const result = empty();
+    result.unknown = left.unknown;
     for (const dimension of dimensions) {
       const amount = dimension === "maxConcurrency" ? Math.max(left.bounds[dimension], right.bounds[dimension]) : left.bounds[dimension] + right.bounds[dimension];
       if (!Number.isSafeInteger(amount)) {
@@ -81,7 +83,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
         if (node) result.unknown.push(unknown(node, "arithmetic_overflow"));
       } else result.bounds[dimension] = amount;
     }
-    result.unknown.push(...left.unknown, ...right.unknown);
+    for (const value of right.unknown) result.unknown.push(value);
     return result;
   }
   function exclusive(left, right) {
@@ -97,7 +99,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
       result.bounds.maxAttempts += value.bounds.maxAttempts;
       result.bounds.maxItems += value.bounds.maxItems;
       result.bounds.maxConcurrency += Math.max(1, value.bounds.maxConcurrency);
-      result.unknown.push(...value.unknown);
+      for (const item of value.unknown) result.unknown.push(item);
     }
     for (const dimension of dimensions) if (!Number.isSafeInteger(result.bounds[dimension])) {
       result.bounds[dimension] = Number.MAX_SAFE_INTEGER;
@@ -114,13 +116,31 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
         result.unknown.push(unknown(node, "arithmetic_overflow"));
       } else result.bounds[dimension] = amount;
     }
-    result.unknown.push(...value.unknown);
+    for (const item of value.unknown) result.unknown.push(item);
     return result;
+  }
+  function dedupeUnknown(values) {
+    const seen = new Set();
+    return values.filter((item) => {
+      const key = `${item.reason}\0${item.path}\0${item.line}\0${item.column}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
   function unknown(node, reason) {
     const sourceFile = node.getSourceFile();
     const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
     return { reason, path: stablePath(sourceFile.fileName), line: start.line + 1, column: start.character + 1 };
+  }
+  const required = new Set(limits.keys());
+  const pending = [...required];
+  for (let index = 0; index < pending.length; index++) {
+    for (const edge of graphByName.get(pending[index])?.calls ?? []) {
+      if (!graphByName.has(edge.target) || required.has(edge.target)) continue;
+      required.add(edge.target);
+      pending.push(edge.target);
+    }
   }
   const recursive = new Set();
   function reaches(start, current, seen) {
@@ -131,10 +151,10 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     }
     return false;
   }
-  for (const name of graphByName.keys()) if (reaches(name, name, new Set())) recursive.add(name);
+  for (const name of required) if (reaches(name, name, new Set())) recursive.add(name);
 
   const current = new Map();
-  for (const [name, node] of graphByName) {
+  for (const name of required) {
     const description = descriptions.find((value) => value.canonicalName === name);
     if (description?.package && limits.has(name)) current.set(name, { bounds: { ...empty().bounds, ...limits.get(name) }, unknown: [] });
     else current.set(name, empty());
@@ -171,6 +191,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
 
   function evaluate(node, owner) {
     if (!node) return empty();
+    if (isCallable(node)) return empty();
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
           ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "Promise" &&
@@ -202,9 +223,11 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     ts.forEachChild(node, (child) => { result = sequential(result, evaluate(child, owner), node); });
     return result;
   }
-  for (let pass = 0; pass < graph.length + 1; pass++) {
+  for (let pass = 0; pass < required.size + 1; pass++) {
     let changed = false;
-    for (const [name, node] of nodeByCanonical) {
+    for (const name of required) {
+      const node = nodeByCanonical.get(name);
+      if (!node) continue;
       const description = descriptions.find((value) => value.canonicalName === name);
       if (description?.package && limits.has(name)) continue;
       if (recursive.has(name)) { current.set(name, { ...empty(), unknown: [unknown(node, "recursive_cycle")] }); continue; }
@@ -214,6 +237,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
         if (["Promise.all", "Promise.allSettled", "Promise.any", "Promise.race"].includes(leaf.symbol)) continue;
         next.unknown.push({ reason: leaf.reason, path: leaf.provenance?.[0]?.path ?? graphNode.location.path, line: leaf.provenance?.[0]?.range?.start?.line ?? graphNode.location.range.start.line, column: leaf.provenance?.[0]?.range?.start?.column ?? graphNode.location.range.start.column });
       }
+      next.unknown = dedupeUnknown(next.unknown);
       const before = JSON.stringify(current.get(name));
       const after = JSON.stringify(next);
       if (before !== after) { current.set(name, next); changed = true; }
@@ -224,8 +248,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
   const violations = [];
   for (const [symbol, limit] of limits) {
     const value = current.get(symbol) ?? { ...empty(), unknown: [{ reason: "missing_summary", path: "", line: 0, column: 0 }] };
-    const deduped = new Map(value.unknown.map((item) => [`${item.reason}\0${item.path}\0${item.line}\0${item.column}`, item]));
-    const result = { symbol, bounds: value.bounds, limits: limit, unknown: [...deduped.values()] };
+    const result = { symbol, bounds: value.bounds, limits: limit, unknown: dedupeUnknown(value.unknown) };
     results.push(result);
     for (const dimension of dimensions) if (limit[dimension] !== undefined && value.bounds[dimension] > limit[dimension]) violations.push({ symbol, dimension, actual: value.bounds[dimension], limit: limit[dimension] });
   }
