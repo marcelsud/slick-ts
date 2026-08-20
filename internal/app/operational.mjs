@@ -1,13 +1,33 @@
-function analyzeOperational(program, projectRoot, ts) {
+function analyzeOperational(program, projectRoot, ts, packages = []) {
   const checker = program.getTypeChecker();
   const records = [];
   const byDeclaration = new Map();
   const bySymbol = new Map();
+  const canonicalSymbols = new Map();
+  const pureConstructions = new Set();
   const identifiers = new Set();
+  const packageBySource = new Map();
+  for (const dependency of packages) {
+    for (const fileName of dependency.sources ?? []) {
+      packageBySource.set(path.resolve(fileName), dependency);
+    }
+  }
+
 
   function stableSourcePath(fileName) {
     return path.relative(projectRoot, path.resolve(fileName)).split(path.sep).join("/");
   }
+  function packageForSymbol(symbol) {
+    const files = (symbol?.declarations ?? []).map((declaration) => path.resolve(declaration.getSourceFile().fileName));
+    return packages.find((dependency) =>
+      files.some((fileName) =>
+        fileName === dependency.declarationFile ||
+        fileName === dependency.implementationFile ||
+        fileName.startsWith(dependency.packageRoot + path.sep),
+      ),
+    );
+  }
+
 
   function sourceRange(node) {
     const sourceFile = node.getSourceFile();
@@ -155,6 +175,7 @@ function analyzeOperational(program, projectRoot, ts) {
             path: stableSourcePath(node.getSourceFile().fileName),
             range: sourceRange(namedNode),
           },
+          package: packageBySource.get(path.resolve(node.getSourceFile().fileName))?.identity,
           errors: [],
           effects: [],
           unresolved: [],
@@ -229,6 +250,7 @@ function analyzeOperational(program, projectRoot, ts) {
   function modeledEffect(call) {
     const callee = call.expression;
     const symbol = symbolAtCall(call);
+    if (ts.isNewExpression(call) && pureConstructions.has(symbol)) return "pure";
     if (ts.isIdentifier(callee)) {
       if (callee.text === "fetch" && isExternalSymbol(symbol)) return "network";
       if (["setTimeout", "setInterval"].includes(callee.text) && isExternalSymbol(symbol)) return "time";
@@ -285,7 +307,8 @@ function analyzeOperational(program, projectRoot, ts) {
   }
 
   function typeIdentity(type) {
-    const symbol = type.aliasSymbol ?? type.symbol;
+    const original = type.aliasSymbol ?? type.symbol;
+    const symbol = canonicalSymbols.get(original) ?? original;
     if (!symbol) return checker.typeToString(type);
     const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
     if (declaration) {
@@ -488,12 +511,37 @@ function analyzeOperational(program, projectRoot, ts) {
   function unresolvedCall(call, record) {
     const symbol = symbolAtCall(call);
     const declarations = symbol?.declarations ?? [];
-    const reason = declarations.length > 0 && declarations.every(isDeclarationOnly)
-      ? "declaration_only"
-      : "unmodeled_call";
+    const dependency = packageForSymbol(symbol);
+    const imported = call.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      ts.isStringLiteral(call.arguments[0])
+      ? packages.find((value) => {
+          const name = packageNameFromSpecifier(call.arguments[0].text);
+          return value.name === name &&
+            value.exportPath === packageExportFromSpecifier(call.arguments[0].text, name);
+        })
+      : undefined;
+    const packageIdentity = dependency?.identity ?? imported?.identity ?? record.package;
+    let reason;
+    if (call.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      reason = "dynamic_import_target";
+    } else if (ts.isIdentifier(call.expression) && call.expression.text === "eval") {
+      reason = "dynamic_code";
+    } else if (ts.isIdentifier(call.expression) && call.expression.text === "Function") {
+      reason = "generated_function";
+    } else if (ts.isPropertyAccessExpression(call.expression) && call.expression.expression.getText() === "Reflect") {
+      reason = "reflection";
+    } else {
+      reason = dependency?.reason ?? (
+        declarations.length > 0 && declarations.every(isDeclarationOnly)
+          ? "declaration_only"
+          : "unmodeled_call"
+      );
+    }
     return {
       symbol: call.expression.getText(call.getSourceFile()),
       reason,
+      dimensions: ["errors", "effects", "execution"],
+      ...(packageIdentity && { package: packageIdentity }),
       provenance: provenance(record, call),
     };
   }
@@ -621,19 +669,165 @@ function analyzeOperational(program, projectRoot, ts) {
   }
 
   for (const sourceFile of program.getSourceFiles()) {
-    const relative = path.relative(projectRoot, path.resolve(sourceFile.fileName));
-    if (
+    const absolute = path.resolve(sourceFile.fileName);
+    const relative = path.relative(projectRoot, absolute);
+    const authored = (
       !sourceFile.isDeclarationFile &&
       relative !== "" &&
       relative !== ".." &&
       !relative.startsWith(`..${path.sep}`) &&
       !relative.split(path.sep).includes("node_modules")
-    ) {
-      discover(sourceFile);
+    );
+    if (authored || packageBySource.has(absolute)) discover(sourceFile);
+  }
+
+  function exportsOf(fileName) {
+    const sourceFile = fileName && (
+      program.getSourceFile(fileName) ??
+      program.getSourceFiles().find((candidate) => path.resolve(candidate.fileName) === path.resolve(fileName))
+    );
+    const symbol = sourceFile?.symbol;
+    return symbol ? new Map(checker.getExportsOfModule(symbol).map((value) => [value.name, value])) : new Map();
+  }
+
+  const pairedSymbols = new Map();
+  function pairSymbols(declaration, implementation, dependency) {
+    const declared = resolveAlias(declaration);
+    const implemented = resolveAlias(implementation);
+    const seen = pairedSymbols.get(declared) ?? new Set();
+    if (seen.has(implemented)) return;
+    seen.add(implemented);
+    pairedSymbols.set(declared, seen);
+    canonicalSymbols.set(implemented, declared);
+
+    const target = bySymbol.get(implemented) ??
+      (implemented.declarations ?? []).map((value) => byDeclaration.get(value)).find(Boolean);
+    if (target) {
+      target.package = dependency.identity;
+      bySymbol.set(declared, target);
+      for (const value of declared.declarations ?? []) {
+        if (isCallable(value)) byDeclaration.set(value, target);
+      }
+    }
+
+    for (const [declaredMembers, implementedMembers] of [
+      [declared.members, implemented.members],
+      [declared.exports, implemented.exports],
+    ]) {
+      if (!declaredMembers || !implementedMembers) continue;
+      for (const [name, member] of declaredMembers) {
+        const implementedMember = implementedMembers.get(name);
+        if (implementedMember) pairSymbols(member, implementedMember, dependency);
+      }
+    }
+
+    const declaredClasses = (declared.declarations ?? []).filter(ts.isClassDeclaration);
+    const implementedClasses = (implemented.declarations ?? []).filter(ts.isClassDeclaration);
+    for (const declaredClass of declaredClasses) {
+      const implementedClass = implementedClasses[0];
+      if (!implementedClass) continue;
+      const declaredConstructor = declaredClass.members.find(ts.isConstructorDeclaration);
+      const implementedConstructor = implementedClass.members.find(ts.isConstructorDeclaration);
+      const constructorTarget = implementedConstructor && byDeclaration.get(implementedConstructor);
+      if (declaredConstructor && constructorTarget) {
+        constructorTarget.package = dependency.identity;
+        byDeclaration.set(declaredConstructor, constructorTarget);
+        bySymbol.set(declared, constructorTarget);
+      }
+      const hasImplicitWork = implementedClass.heritageClauses?.some(
+        (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+      ) || implementedClass.members.some(
+        (member) => ts.isPropertyDeclaration(member) &&
+          member.initializer &&
+          !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+      );
+      if (!implementedConstructor && !hasImplicitWork) pureConstructions.add(declared);
     }
   }
-  for (const record of records) {
-    analyze(record);
+
+  for (const dependency of packages) {
+    if (!dependency.declarationFile || !dependency.implementationFile) continue;
+    const declarations = exportsOf(dependency.declarationFile);
+    const implementations = exportsOf(dependency.implementationFile);
+    for (const [name, declaration] of declarations) {
+      const implementation = implementations.get(name);
+      if (implementation) pairSymbols(declaration, implementation, dependency);
+    }
   }
-  return records.map(({ node: _node, ...record }) => record);
+
+  const cache = { hits: 0, misses: 0 };
+  const cached = new Set();
+  const cacheDirectory = process.env.SLICK_CACHE_DIR || path.join(projectRoot, "node_modules", ".cache", "slick");
+  const groups = new Map();
+  for (const record of records) {
+    if (!record.package) continue;
+    const dependency = packages.find((value) => value.identity === record.package);
+    if (!dependency?.implementationFile) continue;
+    const group = groups.get(dependency.cacheKey) ?? { dependency, records: [] };
+    group.records.push(record);
+    groups.set(dependency.cacheKey, group);
+  }
+
+  let cacheWritable = true;
+  if (groups.size > 0) {
+    try {
+      fs.mkdirSync(cacheDirectory, { recursive: true });
+    } catch {
+      cacheWritable = false;
+    }
+  }
+  for (const [cacheKey, group] of groups) {
+    const cachePath = path.join(cacheDirectory, `${crypto.createHash("sha256").update(cacheKey).digest("hex")}.json`);
+    let value;
+    try {
+      value = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    } catch {}
+    const byCachedSymbol = new Map((value?.records ?? []).map((record) => [record.symbol, record]));
+    if (
+      value?.version === analysisSchemaVersion &&
+      value?.key === cacheKey &&
+      group.records.every((record) => byCachedSymbol.has(record.symbol))
+    ) {
+      for (const record of group.records) {
+        const stored = byCachedSymbol.get(record.symbol);
+        record.errors = stored.errors;
+        record.effects = stored.effects;
+        record.unresolved = stored.unresolved;
+        record.calls = stored.calls;
+        cached.add(record);
+      }
+      cache.hits++;
+      continue;
+    }
+    if (cacheWritable) group.cachePath = cachePath;
+    cache.misses++;
+  }
+
+  for (const record of records) {
+    if (!cached.has(record)) analyze(record);
+  }
+  for (const [cacheKey, group] of groups) {
+    if (!group.cachePath) continue;
+    const value = {
+      version: analysisSchemaVersion,
+      key: cacheKey,
+      records: group.records.map(({ symbol, errors, effects, unresolved, calls }) => ({
+        symbol,
+        errors,
+        effects,
+        unresolved,
+        calls,
+      })),
+    };
+    const temporary = `${group.cachePath}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(value));
+      fs.renameSync(temporary, group.cachePath);
+    } catch {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {}
+    }
+  }
+  return { graph: records.map(({ node: _node, ...record }) => record), cache };
 }

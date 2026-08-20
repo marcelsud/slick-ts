@@ -153,7 +153,7 @@ The specified compiler must be TypeScript 5.9.3.
 
 ## Operational analysis
 
-The internal semantic model records facts for reachable authored code.
+The internal semantic model records facts for reachable authored and package code.
 
 - Concrete `Error` subclasses
 - Synchronous or asynchronous error delivery
@@ -165,9 +165,10 @@ The model propagates facts through local calls. The fixed-point solver
 converges on recursive call graphs. TypeScript symbols resolve authored call
 targets. Typed `catch` guards remove only handled errors.
 
-Package implementation analysis is not available yet. Slick keeps a
-declaration-only dependency call unresolved. Slick does not mark the call
-safe.
+Slick follows reachable package exports into available implementation source,
+including transitive package calls. Declaration-only, native, dynamic, and
+otherwise unmodeled leaves remain unresolved with package identity and evidence.
+Dependency summaries are cached by package artifact and analysis configuration.
 
 ## Test
 
@@ -194,6 +195,7 @@ Run static checks.
 ```sh
 go vet ./...
 node --check internal/app/analyzer.mjs
+node --check internal/app/packages.mjs
 node --check internal/app/operational.mjs
 ```
 

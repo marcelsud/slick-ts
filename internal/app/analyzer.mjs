@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -6,8 +7,8 @@ const supportedTypeScript = "5.9.3";
 const configPath = path.resolve(process.env.SLICK_CONFIG_PATH);
 const projectRoot = path.dirname(configPath);
 
-function response(diagnostics = [], failure, graph = []) {
-  return JSON.stringify({ diagnostics, graph, ...(failure && { failure }) });
+function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }) {
+  return JSON.stringify({ diagnostics, graph, cache, ...(failure && { failure }) });
 }
 
 function failure(kind, message, diagnostics = []) {
@@ -143,13 +144,19 @@ const diagnostics = ts.getPreEmitDiagnostics(program);
 const projectReferenceFailure = diagnostics.some(
   ({ code }) => (code >= 6305 && code <= 6312) || code === 6377 || code === 6378,
 );
-const graph = projectReferenceFailure ? [] : analyzeOperational(program, projectRoot, ts);
+const resolved = projectReferenceFailure
+  ? { program, packages: [] }
+  : resolvePackageImplementations(program, parsed, projectRoot, ts);
+const operational = projectReferenceFailure
+  ? { graph: [], cache: { hits: 0, misses: 0 } }
+  : analyzeOperational(resolved.program, projectRoot, ts, resolved.packages);
 process.stdout.write(
   response(
     normalize(diagnostics),
     projectReferenceFailure
       ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
       : undefined,
-    graph,
+    operational.graph,
+    operational.cache,
   ),
 );
