@@ -85,11 +85,19 @@ func TestBoundsThresholdEqualityPassesAndDescribeUsesSameFacts(t *testing.T) {
 		"dep.asyncWork":           map[string]int{"timeoutMs": 100, "maxAttempts": 1, "maxItems": 2, "maxConcurrency": 1},
 		"src/main.ts::branch":     map[string]int{"timeoutMs": 100, "maxItems": 2},
 		"src/main.ts::concurrent": map[string]int{"timeoutMs": 100, "maxItems": 4, "maxConcurrency": 2},
+		"src/main.ts::offsetLoop": map[string]int{"maxItems": 10},
 	})
 	output, stderr, code := runSlick(t, root, nil, "bounds", "--json")
 	document := decodeBounds(t, output)
 	if code != 0 || stderr != "" || !document.Success || document.Bounds == nil || len(document.Bounds.Violations) != 0 {
 		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
+	}
+	results := map[string]boundResult{}
+	for _, result := range document.Bounds.Results {
+		results[result.Symbol] = result
+	}
+	if results["src/main.ts::offsetLoop"].Bounds["maxItems"] != 10 {
+		t.Fatalf("offset loop bound: %+v", results["src/main.ts::offsetLoop"])
 	}
 	described := runDescribe(t, root, "src/main.ts::branch")
 	if described.Contract.Bounds == nil || described.Contract.Bounds.Bounds["timeoutMs"] != 100 || described.Contract.Bounds.Bounds["maxItems"] != 2 {
@@ -106,6 +114,18 @@ func TestBoundsRejectInvalidContracts(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
 	}
 }
+func TestBoundsReturnsStructuredOverflowFailure(t *testing.T) {
+	root := boundsProject(t)
+	writeBounds(t, root, map[string]any{
+		"dep.work":                map[string]int{"maxItems": 9007199254740991},
+		"src/main.ts::sequential": map[string]int{"maxItems": 9007199254740991},
+	})
+	output, stderr, code := runSlick(t, root, nil, "bounds", "--json")
+	document := decodeBounds(t, output)
+	if code != 1 || stderr != "" || document.Error == nil || document.Error.Kind != "bounds_overflow" {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
 
 func boundsProject(t *testing.T) string {
 	t.Helper()
@@ -115,6 +135,7 @@ func boundsProject(t *testing.T) string {
 export function sequential(): void { work(); work(); }
 export function branch(flag: boolean): void { if (flag) work(); else work(); }
 export function bounded(): void { for (let index = 0; index < 3; index++) work(); }
+export function offsetLoop(): void { for (let index = 5; index < 10; index++) work(); }
 export function unknown(items: number[]): void { for (const item of items) { void item; work(); } }
 export async function concurrent(): Promise<void> { await Promise.all([asyncWork(), asyncWork()]); }
 export function recursive(): void { recursive(); }`,

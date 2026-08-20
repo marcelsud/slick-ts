@@ -362,6 +362,7 @@ Structured failures use these `error.kind` values.
 - `mutation_failure`
 - `test_command_failure`
 - `bounds_configuration`
+- `bounds_overflow`
 - `entry_configuration`
 - `architecture_configuration`
 

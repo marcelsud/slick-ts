@@ -29,6 +29,7 @@ type coverageSummary struct {
 
 type coverageFile struct {
 	Path          string `json:"path"`
+	State         string `json:"state"`
 	BranchCovered int    `json:"branchCovered"`
 	BranchTotal   int    `json:"branchTotal"`
 }
@@ -128,6 +129,33 @@ export const value: Value = { value: 1 };`)
 		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
 	}
 }
+func TestCoverageDistinguishesMissingFilesFromMeasuredZero(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/main.ts": `export function measured(flag: boolean): number {
+  if (flag) return 1;
+  return 0;
+}`,
+		"src/missing.ts": `export function missing(flag: boolean): number {
+  if (flag) return 1;
+  return 0;
+}`,
+	})
+	coveragePath := writeCoverageQuality(t, root, "src/main.ts", []int{0, 0})
+	output, stderr, code := runSlick(t, root, nil, "coverage", "--json", "--coverage", coveragePath,
+		"--branch-threshold", "0", "--changed-line-threshold", "0", "--uncovered-complexity-threshold", "10")
+	document := decodeCoverage(t, output)
+	if code != 1 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+	states := map[string]string{}
+	for _, file := range document.Files {
+		states[file.Path] = file.State
+	}
+	if states["src/main.ts"] != "measured" || states["src/missing.ts"] != "missing" || document.CoverageSummary == nil || document.CoverageSummary.BranchPercent >= 100 {
+		t.Fatalf("coverage states: %+v summary=%+v", states, document.CoverageSummary)
+	}
+}
+
 func writeCoverageQuality(t *testing.T, root, relative string, counts []int) string {
 
 	t.Helper()

@@ -22,8 +22,8 @@ type RiskInput struct {
 
 type RiskComponents struct {
 	ChangedLines float64  `json:"changedLines"`
-	Churn        float64  `json:"churn"`
-	Authors      float64  `json:"authors"`
+	Churn        *float64 `json:"churn,omitempty"`
+	Authors      *float64 `json:"authors,omitempty"`
 	Complexity   float64  `json:"complexity"`
 	Uncovered    *float64 `json:"uncovered,omitempty"`
 	FanIn        float64  `json:"fanIn"`
@@ -86,7 +86,7 @@ func loadRiskConfig(name string) (riskConfig, error) {
 }
 
 func gitHistory(ctx context.Context, root, path, since string) (historyStats, error) {
-	command := exec.CommandContext(ctx, "git", "log", "--since="+since, "--format=commit:%H:%ae", "--numstat", "--", path)
+	command := exec.CommandContext(ctx, "git", "log", "--follow", "--since="+since, "--format=commit:%H:%ae", "--numstat", "--", path)
 	command.Dir = root
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -120,15 +120,22 @@ func gitHistory(ctx context.Context, root, path, since string) (historyStats, er
 func scoreRisk(input RiskInput, changedCount int, history historyStats, weights map[string]float64, shallow bool) RiskResult {
 	components := RiskComponents{
 		ChangedLines: clamp(float64(changedCount) / 50),
-		Churn:        clamp(float64(history.churn) / 500),
-		Authors:      clamp(float64(len(history.authors)) / 5),
 		Complexity:   clamp(float64(input.Complexity) / 20),
 		FanIn:        clamp(float64(input.FanIn) / 20),
 	}
 	missing := []string{}
 	values := map[string]*float64{
-		"changedLines": &components.ChangedLines, "churn": &components.Churn, "authors": &components.Authors,
-		"complexity": &components.Complexity, "fanIn": &components.FanIn,
+		"changedLines": &components.ChangedLines,
+		"complexity":   &components.Complexity,
+		"fanIn":        &components.FanIn,
+	}
+	if shallow {
+		missing = append(missing, "shallow_history")
+	} else {
+		churn := clamp(float64(history.churn) / 500)
+		authors := clamp(float64(len(history.authors)) / 5)
+		components.Churn, components.Authors = &churn, &authors
+		values["churn"], values["authors"] = components.Churn, components.Authors
 	}
 	if input.Coverage == nil {
 		missing = append(missing, "coverage")
@@ -137,9 +144,7 @@ func scoreRisk(input RiskInput, changedCount int, history historyStats, weights 
 		components.Uncovered = &uncovered
 		values["uncovered"] = components.Uncovered
 	}
-	if shallow {
-		missing = append(missing, "shallow_history")
-	}
+	// Shallow history stays absent from the weighted denominator.
 	weighted, totalWeight := 0.0, 0.0
 	for name, weight := range weights {
 		value := values[name]

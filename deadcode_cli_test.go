@@ -80,8 +80,8 @@ func TestDeadCodeRequiresAnEntryWhenNoIndexExists(t *testing.T) {
 	}
 }
 func TestDeadCodeUsesPackageExportsAndSideEffectModules(t *testing.T) {
-	root := project(t, `{"compilerOptions":{"strict":true,"module":"NodeNext","moduleResolution":"NodeNext"},"include":["src"]}`, map[string]string{
-		"package.json":  `{"type":"module","exports":"./src/public.ts"}`,
+	root := project(t, `{"compilerOptions":{"strict":true,"module":"NodeNext","moduleResolution":"NodeNext","rootDir":"src","outDir":"dist"},"include":["src"]}`, map[string]string{
+		"package.json":  `{"type":"module","exports":"./dist/public.js"}`,
 		"src/public.ts": `import "./side.js"; export function publicValue(): number { return 1; }`,
 		"src/side.ts": `function initialize(): void { console.log("ready"); }
 initialize();

@@ -100,12 +100,16 @@ function analyzeCoverageQuality(program, projectRoot, ts, coveragePath, collecte
   const functions = [];
   let branchCovered = 0;
   let branchTotal = 0;
+  let missingFiles = 0;
   for (const sourceFile of program.getSourceFiles()) {
     const absolute = path.resolve(sourceFile.fileName);
     const callableRecords = collected.functionsByFile.get(absolute);
     if (!callableRecords) continue;
     const fileCoverage = coverageFor(absolute);
-    const lineState = new Map([...executableLines(sourceFile)].map((line) => [line, false]));
+    const executable = executableLines(sourceFile);
+    const state = fileCoverage ? "measured" : executable.size > 0 || callableRecords.length > 0 ? "missing" : "not_executable";
+    if (state === "missing") missingFiles++;
+    const lineState = new Map([...executable].map((line) => [line, false]));
     let fileBranchCovered = 0;
     let fileBranchTotal = 0;
 
@@ -123,12 +127,15 @@ function analyzeCoverageQuality(program, projectRoot, ts, coveragePath, collecte
         const callable = start === undefined || end === undefined ? undefined : owner(callableRecords, start, end);
         if (callable && counts.some((count) => count === 0)) callable.uncoveredDecisions = (callable.uncoveredDecisions ?? 0) + 1;
       }
+    } else if (state === "missing") {
+      fileBranchTotal = callableRecords.reduce((total, callable) => total + Math.max(0, callable.complexity - 1) * 2, 0);
     }
 
     branchCovered += fileBranchCovered;
     branchTotal += fileBranchTotal;
     files.push({
       path: stablePath(absolute),
+      state,
       branchCovered: fileBranchCovered,
       branchTotal: fileBranchTotal,
       lines: [...lineState].sort((left, right) => left[0] - right[0]).map(([line, covered]) => ({ line, covered })),
@@ -149,5 +156,5 @@ function analyzeCoverageQuality(program, projectRoot, ts, coveragePath, collecte
     const pathOrder = left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
     return pathOrder || left.range.start.offset - right.range.start.offset;
   });
-  return { report: { branchCovered, branchTotal, files, functions } };
+  return { report: { branchCovered, branchTotal, missingFiles, files, functions } };
 }

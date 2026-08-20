@@ -90,7 +90,9 @@ function analyzeDescriptions(program, graph, projectRoot, ts, packages) {
       };
     }
     const typeArguments = type.objectFlags & ts.ObjectFlags.Reference ? checker.getTypeArguments(type) : [];
-    const properties = depth < 2 && (!symbol || symbol.name === "__type") ? checker.getPropertiesOfType(type).map((property) => {
+    const expandProperties = !symbol || symbol.name === "__type" ||
+      (symbol.declarations ?? []).some((declaration) => ts.isInterfaceDeclaration(declaration) || ts.isTypeLiteralNode(declaration));
+    const properties = depth < 2 && expandProperties ? checker.getPropertiesOfType(type).map((property) => {
       const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? location;
       return {
         name: property.name,

@@ -18,6 +18,7 @@ type CoverageLine struct {
 
 type CoverageFile struct {
 	Path          string         `json:"path"`
+	State         string         `json:"state"`
 	BranchCovered int            `json:"branchCovered"`
 	BranchTotal   int            `json:"branchTotal"`
 	Lines         []CoverageLine `json:"lines"`
@@ -34,6 +35,7 @@ type CoverageFunction struct {
 type CoverageReport struct {
 	BranchCovered int                `json:"branchCovered"`
 	BranchTotal   int                `json:"branchTotal"`
+	MissingFiles  int                `json:"missingFiles"`
 	Files         []CoverageFile     `json:"files"`
 	Functions     []CoverageFunction `json:"functions"`
 }

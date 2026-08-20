@@ -72,7 +72,7 @@ func TestArchitectureReportsLayersCyclesAndFanThresholds(t *testing.T) {
 func TestArchitectureCanAllowTypeOnlyCyclesAndRejectsBadConfig(t *testing.T) {
 	root := project(t, `{"compilerOptions":{"strict":true,"module":"NodeNext","moduleResolution":"NodeNext"},"include":["src"]}`, map[string]string{
 		"package.json": `{"type":"module"}`,
-		"src/a.ts":     `import type { B } from "./b.js"; export interface A { b: B }`,
+		"src/a.ts":     `import type { B } from "./b.js"; export { type B } from "./b.js"; export interface A { b: B }`,
 		"src/b.ts":     `import type { A } from "./a.js"; export interface B { a: A }`,
 	})
 	writeArchitectureConfig(t, root, true, 0, 0)
@@ -99,6 +99,31 @@ func TestArchitectureKeepsDynamicTargetsUnresolved(t *testing.T) {
 	document := decodeArchitecture(t, output)
 	if code != 1 || stderr != "" || document.Architecture == nil || len(document.Architecture.Unresolved) != 1 || document.Architecture.Unresolved[0].Reason != "dynamic_import_target" {
 		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
+func TestArchitectureReturnsAClosedCyclePath(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true,"module":"NodeNext","moduleResolution":"NodeNext"},"include":["src"]}`, map[string]string{
+		"package.json": `{"type":"module"}`,
+		"src/a.ts":     `import { c } from "./c.js"; export const a = c;`,
+		"src/b.ts":     `import { a } from "./a.js"; export const b = a;`,
+		"src/c.ts":     `import { b } from "./b.js"; export const c = b;`,
+	})
+	writeArchitectureConfig(t, root, false, 0, 0)
+	output, _, code := runSlick(t, root, nil, "architecture", "--json")
+	document := decodeArchitecture(t, output)
+	if code != 1 || document.Architecture == nil || len(document.Architecture.Cycles) != 1 {
+		t.Fatalf("exit %d, output %+v", code, document)
+	}
+	path := document.Architecture.Cycles[0].Modules
+	expected := []string{"src/a.ts", "src/c.ts", "src/b.ts", "src/a.ts"}
+	if len(path) != len(expected) {
+		t.Fatalf("cycle path: %v", path)
+	}
+	for index := range expected {
+		if path[index] != expected[index] {
+			t.Fatalf("cycle path: %v", path)
+		}
 	}
 }
 

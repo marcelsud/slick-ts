@@ -474,7 +474,8 @@ func runCoverage(ctx context.Context, args []string, stdout, stderr io.Writer, a
 		doc.Functions = functions
 		passed := summary.BranchPercent >= *branchThreshold && summary.ChangedLinePercent >= *changedThreshold
 		for _, file := range analysis.Coverage.Files {
-			if file.BranchTotal > 0 && percent(file.BranchCovered, file.BranchTotal) < *branchThreshold {
+			if file.State == "missing" ||
+				file.BranchTotal > 0 && percent(file.BranchCovered, file.BranchTotal) < *branchThreshold {
 				passed = false
 			}
 		}
@@ -731,7 +732,7 @@ func runAPI(ctx context.Context, args []string, stdout, stderr io.Writer, analyz
 		Error:       analysis.Failure,
 	}
 	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
-		snapshot, snapshotErr := buildAPISnapshot(analysis, entries)
+		snapshot, snapshotErr := buildAPISnapshot(analysis, entries, filepath.Dir(config))
 		if snapshotErr != nil {
 			doc.Error = &Failure{Kind: "api_snapshot_failure", Message: snapshotErr.Error()}
 		} else if subcommand == "snapshot" {
@@ -1084,10 +1085,18 @@ func runMutation(ctx context.Context, args []string, stdout, stderr io.Writer, a
 	isolatedConfig = filepath.Join(isolated, isolatedConfig)
 	for _, candidate := range candidates {
 		result := MutationResult{MutationCandidate: candidate}
-		if coveragePath != "" && candidate.Symbol != "" && coverageBySymbol[candidate.Symbol] == 0 {
-			result.Status = "not_covered"
-			report.Results = append(report.Results, result)
-			continue
+		if coveragePath != "" && candidate.Symbol != "" {
+			coverage, measured := coverageBySymbol[candidate.Symbol]
+			if !measured {
+				result.Status = "coverage_unknown"
+				report.Results = append(report.Results, result)
+				continue
+			}
+			if coverage == 0 {
+				result.Status = "not_covered"
+				report.Results = append(report.Results, result)
+				continue
+			}
 		}
 		original, err := applyMutation(isolated, candidate)
 		if err != nil {
@@ -1114,7 +1123,7 @@ func runMutation(ctx context.Context, args []string, stdout, stderr io.Writer, a
 	}
 	finishMutationReport(report)
 	doc.Mutation = report
-	doc.Success = report.Survived == 0 && report.TimedOut == 0
+	doc.Success = report.Survived == 0 && report.TimedOut == 0 && report.CoverageUnknown == 0
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
 		return 0
@@ -1481,7 +1490,7 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 			}
 			files, _ := doc.Files.([]CoverageFile)
 			for _, file := range files {
-				fmt.Fprintf(stdout, "%s - branch coverage %.1f%% (%d/%d)\n", file.Path, percent(file.BranchCovered, file.BranchTotal), file.BranchCovered, file.BranchTotal)
+				fmt.Fprintf(stdout, "%s - %s, branch coverage %.1f%% (%d/%d)\n", file.Path, file.State, percent(file.BranchCovered, file.BranchTotal), file.BranchCovered, file.BranchTotal)
 			}
 			functions, _ := doc.Functions.([]CoverageFunction)
 			for _, function := range functions {
@@ -1572,7 +1581,7 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 			}
 		case "mutate":
 			if doc.Mutation != nil {
-				fmt.Fprintf(stdout, "mutation score: %.1f%% (%d killed, %d survived, %d timed out, %d invalid, %d not covered)\n", doc.Mutation.Score, doc.Mutation.Killed, doc.Mutation.Survived, doc.Mutation.TimedOut, doc.Mutation.Invalid, doc.Mutation.NotCovered)
+				fmt.Fprintf(stdout, "mutation score: %.1f%% (%d killed, %d survived, %d timed out, %d invalid, %d not covered, %d coverage unknown)\n", doc.Mutation.Score, doc.Mutation.Killed, doc.Mutation.Survived, doc.Mutation.TimedOut, doc.Mutation.Invalid, doc.Mutation.NotCovered, doc.Mutation.CoverageUnknown)
 				for _, result := range doc.Mutation.Results {
 					fmt.Fprintf(stdout, "%s %s:%d:%d %s\n", result.Status, result.Path, result.Range.Start.Line, result.Range.Start.Column, result.ID)
 				}

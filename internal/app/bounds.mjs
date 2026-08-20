@@ -77,7 +77,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     for (const dimension of dimensions) {
       const amount = dimension === "maxConcurrency" ? Math.max(left.bounds[dimension], right.bounds[dimension]) : left.bounds[dimension] + right.bounds[dimension];
       if (!Number.isSafeInteger(amount)) {
-        result.bounds[dimension] = 0;
+        result.bounds[dimension] = Number.MAX_SAFE_INTEGER;
         if (node) result.unknown.push(unknown(node, "arithmetic_overflow"));
       } else result.bounds[dimension] = amount;
     }
@@ -100,7 +100,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
       result.unknown.push(...value.unknown);
     }
     for (const dimension of dimensions) if (!Number.isSafeInteger(result.bounds[dimension])) {
-      result.bounds[dimension] = 0;
+      result.bounds[dimension] = Number.MAX_SAFE_INTEGER;
       result.unknown.push(unknown(node, "arithmetic_overflow"));
     }
     return result;
@@ -110,7 +110,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     for (const dimension of dimensions) {
       const amount = dimension === "maxConcurrency" ? value.bounds[dimension] : value.bounds[dimension] * count;
       if (!Number.isSafeInteger(amount)) {
-        result.bounds[dimension] = 0;
+        result.bounds[dimension] = Number.MAX_SAFE_INTEGER;
         result.unknown.push(unknown(node, "arithmetic_overflow"));
       } else result.bounds[dimension] = amount;
     }
@@ -139,6 +139,36 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     if (description?.package && limits.has(name)) current.set(name, { bounds: { ...empty().bounds, ...limits.get(name) }, unknown: [] });
     else current.set(name, empty());
   }
+  function loopCount(node) {
+    if (!node.initializer || !ts.isVariableDeclarationList(node.initializer) || node.initializer.declarations.length !== 1 ||
+        !node.condition || !ts.isBinaryExpression(node.condition) || !node.incrementor) return undefined;
+    const declaration = node.initializer.declarations[0];
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isNumericLiteral(declaration.initializer) ||
+        !ts.isIdentifier(node.condition.left) || node.condition.left.text !== declaration.name.text || !ts.isNumericLiteral(node.condition.right)) return undefined;
+    const start = Number(declaration.initializer.text), limit = Number(node.condition.right.text);
+    let step;
+    if ((ts.isPostfixUnaryExpression(node.incrementor) || ts.isPrefixUnaryExpression(node.incrementor)) &&
+        ts.isIdentifier(node.incrementor.operand) && node.incrementor.operand.text === declaration.name.text) {
+      step = node.incrementor.operator === ts.SyntaxKind.PlusPlusToken ? 1 : node.incrementor.operator === ts.SyntaxKind.MinusMinusToken ? -1 : undefined;
+    } else if (ts.isBinaryExpression(node.incrementor) && ts.isIdentifier(node.incrementor.left) && node.incrementor.left.text === declaration.name.text && ts.isNumericLiteral(node.incrementor.right)) {
+      const amount = Number(node.incrementor.right.text);
+      step = node.incrementor.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ? amount :
+        node.incrementor.operatorToken.kind === ts.SyntaxKind.MinusEqualsToken ? -amount : undefined;
+    }
+    if (!Number.isFinite(step) || step === 0) return undefined;
+    const operator = node.condition.operatorToken.kind;
+    if (step > 0 && (operator === ts.SyntaxKind.LessThanToken || operator === ts.SyntaxKind.LessThanEqualsToken)) {
+      if (start > limit || start === limit && operator === ts.SyntaxKind.LessThanToken) return 0;
+      return operator === ts.SyntaxKind.LessThanEqualsToken ? Math.floor((limit - start) / step) + 1 : Math.max(0, Math.ceil((limit - start) / step));
+    }
+    if (step < 0 && (operator === ts.SyntaxKind.GreaterThanToken || operator === ts.SyntaxKind.GreaterThanEqualsToken)) {
+      if (start < limit || start === limit && operator === ts.SyntaxKind.GreaterThanToken) return 0;
+      const distance = start - limit, amount = -step;
+      return operator === ts.SyntaxKind.GreaterThanEqualsToken ? Math.floor(distance / amount) + 1 : Math.max(0, Math.ceil(distance / amount));
+    }
+    return undefined;
+  }
+
   function evaluate(node, owner) {
     if (!node) return empty();
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
@@ -159,8 +189,7 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
     if (ts.isIfStatement(node)) return sequential(evaluate(node.expression, owner), exclusive(evaluate(node.thenStatement, owner), evaluate(node.elseStatement, owner)), node);
     if (ts.isConditionalExpression(node)) return sequential(evaluate(node.condition, owner), exclusive(evaluate(node.whenTrue, owner), evaluate(node.whenFalse, owner)), node);
     if (ts.isForStatement(node)) {
-      let count;
-      if (node.condition && ts.isBinaryExpression(node.condition) && node.condition.operatorToken.kind === ts.SyntaxKind.LessThanToken && ts.isNumericLiteral(node.condition.right)) count = Number(node.condition.right.text);
+      const count = loopCount(node);
       if (!Number.isSafeInteger(count) || count < 0) return { ...empty(), unknown: [unknown(node, "unbounded_loop")] };
       return multiply(evaluate(node.statement, owner), count, node);
     }
@@ -202,5 +231,9 @@ function analyzeBounds(program, projectRoot, ts, graph, descriptions, contractsP
   }
   results.sort((left, right) => left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0);
   violations.sort((left, right) => left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : left.dimension < right.dimension ? -1 : 1);
-  return { report: { results, violations } };
+  const report = { results, violations };
+  if (results.some((result) => result.unknown.some((item) => item.reason === "arithmetic_overflow"))) {
+    return { report, failure: { kind: "bounds_overflow", message: "resource-bound arithmetic exceeded Number.MAX_SAFE_INTEGER" } };
+  }
+  return { report };
 }

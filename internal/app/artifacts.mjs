@@ -1,5 +1,6 @@
 function analyzeArtifacts(ts, emitRoot, outputs) {
   if (!emitRoot || process.env.SLICK_ARTIFACTS !== "1") return undefined;
+  const builtins = new Set(builtinModules.map((value) => value.replace(/^node:/, "")));
 
   function packageName(specifier) {
     if (specifier.startsWith("@")) return specifier.split("/").slice(0, 2).join("/");
@@ -10,11 +11,14 @@ function analyzeArtifacts(ts, emitRoot, outputs) {
     const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const imports = [];
     function add(node, specifier, kind) {
-      if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("node:")) return;
+      if (specifier.startsWith(".") || specifier.startsWith("/")) return;
+      const bare = specifier.replace(/^node:/, "");
+      const builtin = builtins.has(bare);
       const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       imports.push({
         specifier,
-        package: packageName(specifier),
+        package: builtin ? "" : packageName(specifier),
+        builtin,
         kind,
         line: start.line + 1,
         column: start.character + 1,

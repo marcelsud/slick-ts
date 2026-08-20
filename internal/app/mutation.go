@@ -31,15 +31,16 @@ type MutationResult struct {
 }
 
 type MutationReport struct {
-	TestCommand []string         `json:"testCommand"`
-	Total       int              `json:"total"`
-	Killed      int              `json:"killed"`
-	Survived    int              `json:"survived"`
-	TimedOut    int              `json:"timedOut"`
-	Invalid     int              `json:"invalid"`
-	NotCovered  int              `json:"notCovered"`
-	Score       float64          `json:"score"`
-	Results     []MutationResult `json:"results"`
+	TestCommand     []string         `json:"testCommand"`
+	Total           int              `json:"total"`
+	Killed          int              `json:"killed"`
+	Survived        int              `json:"survived"`
+	TimedOut        int              `json:"timedOut"`
+	Invalid         int              `json:"invalid"`
+	NotCovered      int              `json:"notCovered"`
+	CoverageUnknown int              `json:"coverageUnknown"`
+	Score           float64          `json:"score"`
+	Results         []MutationResult `json:"results"`
 }
 
 func copyMutationProject(source, destination string) error {
@@ -97,10 +98,11 @@ func runTestCommand(ctx context.Context, root string, timeout time.Duration, arg
 	command.Env = os.Environ()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	err := command.Run()
+	if command.Process != nil {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	}
 	if commandCtx.Err() != nil {
-		if command.Process != nil {
-			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		}
+		// The process group was terminated above for every outcome.
 		return "timed_out", commandCtx.Err()
 	}
 	if err != nil {
@@ -157,6 +159,8 @@ func finishMutationReport(report *MutationReport) {
 			report.Invalid++
 		case "not_covered":
 			report.NotCovered++
+		case "coverage_unknown":
+			report.CoverageUnknown++
 		}
 	}
 	report.Total = len(report.Results)

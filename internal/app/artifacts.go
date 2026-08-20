@@ -3,6 +3,7 @@ package app
 type RuntimeImport struct {
 	Specifier string `json:"specifier"`
 	Package   string `json:"package"`
+	Builtin   bool   `json:"builtin"`
 	Kind      string `json:"kind"`
 	Line      int    `json:"line"`
 	Column    int    `json:"column"`

@@ -23,10 +23,13 @@ type apiSnapshot struct {
 }
 
 type apiChange struct {
-	Symbol   string `json:"symbol"`
-	Kind     string `json:"kind"`
-	Breaking bool   `json:"breaking"`
-	Detail   string `json:"detail"`
+	Symbol   string           `json:"symbol"`
+	Kind     string           `json:"kind"`
+	Breaking bool             `json:"breaking"`
+	Detail   string           `json:"detail"`
+	Old      *json.RawMessage `json:"old"`
+	New      *json.RawMessage `json:"new"`
+	Location *sourceLocation  `json:"location"`
 }
 
 func TestAPISnapshotAndDiffClassifyBreakingOperationalChanges(t *testing.T) {
@@ -120,6 +123,38 @@ func TestAPIDiffIncludesExportedClassMembers(t *testing.T) {
 		t.Fatalf("missing class member break: %+v\nbaseline=%s\ndiff=%s", diff.Changes, baseline, diffOutput)
 	}
 }
+func TestAPISnapshotScopesDefaultExportsToPackageEntry(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true,"rootDir":"src","outDir":"dist"},"include":["src"]}`, map[string]string{
+		"package.json":    `{"exports":"./dist/index.js"}`,
+		"src/index.ts":    `export function publicValue(): number { return 1; }`,
+		"src/internal.ts": `export function internalValue(): number { return 2; }`,
+	})
+	output, stderr, code := runSlick(t, root, nil, "api", "snapshot", "--json")
+	document := decodeAPI(t, output)
+	if code != 0 || stderr != "" || document.API == nil || len(document.API.Contracts) != 1 {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
+func TestAPIDiffUsesStructuralAssignabilityAndReportsCompatibleChanges(t *testing.T) {
+	root := apiProject(t, `interface First { value: string }
+export function use(value: First): string | number { return value.value; }`)
+	_, _, code := runSlick(t, root, nil, "api", "snapshot")
+	if code != 0 {
+		t.Fatal("snapshot failed")
+	}
+	writeFile(t, filepath.Join(root, "src", "index.ts"), `interface Second { value: string }
+export function use(value: Second): string { return value.value; }`)
+	output, stderr, diffCode := runSlick(t, root, nil, "api", "diff", "--json")
+	document := decodeAPI(t, output)
+	if diffCode != 0 || stderr != "" || !document.Success || len(document.Changes) != 1 || document.Changes[0].Kind != "compatible_signature_change" || document.Changes[0].Breaking {
+		t.Fatalf("exit %d, stderr %q, output %+v", diffCode, stderr, document)
+	}
+	if document.Changes[0].Old == nil || document.Changes[0].New == nil || document.Changes[0].Location == nil {
+		t.Fatalf("missing change evidence: %+v", document.Changes[0])
+	}
+}
+
 func apiProject(t *testing.T, source string) string {
 	t.Helper()
 

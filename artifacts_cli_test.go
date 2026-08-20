@@ -33,6 +33,7 @@ type artifactFile struct {
 type runtimeImport struct {
 	Specifier string `json:"specifier"`
 	Package   string `json:"package"`
+	Builtin   bool   `json:"builtin"`
 	Kind      string `json:"kind"`
 }
 
@@ -99,7 +100,15 @@ func TestArtifactsFindsCommonJSRequireAndOmitsTypeOnlyImports(t *testing.T) {
 	for _, file := range document.Artifacts.Files {
 		imports = append(imports, file.Imports...)
 	}
-	if len(imports) != 1 || imports[0].Package != "demo" || imports[0].Kind != "require" {
+	if len(imports) != 2 {
+		t.Fatalf("runtime imports: %+v", imports)
+	}
+	foundPackage, foundBuiltin := false, false
+	for _, imported := range imports {
+		foundPackage = foundPackage || imported.Package == "demo" && imported.Kind == "require" && !imported.Builtin
+		foundBuiltin = foundBuiltin || imported.Specifier == "fs" && imported.Builtin && imported.Package == ""
+	}
+	if !foundPackage || !foundBuiltin {
 		t.Fatalf("runtime imports: %+v", imports)
 	}
 	human, humanErr, humanCode := runSlick(t, root, nil, "artifacts")
@@ -116,9 +125,12 @@ func artifactProject(t *testing.T, module, resolution string) string {
 	}`
 	return project(t, config, map[string]string{
 		"package.json": `{"type":"module"}`,
-		"src/main.ts": `import { value, type Thing } from "demo";
+		"src/main.ts": `import { readFileSync } from "fs";
+import { value, type Thing } from "demo";
+void readFileSync;
 export const result: Thing = { value };
 console.log(result.value);`,
+		"src/globals.d.ts":               `declare module "fs" { export function readFileSync(name: string): Uint8Array; }`,
 		"node_modules/demo/package.json": `{"name":"demo","version":"1.0.0","main":"index.js","types":"index.d.ts"}`,
 		"node_modules/demo/index.d.ts":   `export interface Thing { value: number } export declare const value: number;`,
 		"node_modules/demo/index.js":     `exports.value = 42;`,

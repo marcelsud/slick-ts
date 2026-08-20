@@ -42,7 +42,7 @@ process.exit(source.includes("value - 1") ? 1 : 0);`)
 	output, stderr, code := runSlick(t, root, nil, "mutate", "--json", "--max-mutants", "2", "--", "node", "test.cjs")
 	document := decodeMutation(t, output)
 	if code != 1 || stderr != "" || document.Mutation == nil || document.Mutation.Total != 2 || document.Mutation.Killed != 1 || document.Mutation.Survived != 1 || document.Mutation.Score != 50 {
-		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
 	}
 	after, _ := os.ReadFile(filepath.Join(root, "src", "main.ts"))
 	if string(before) != string(after) {
@@ -65,7 +65,7 @@ if (source.includes("value - 1")) setTimeout(() => {}, 1000);`)
 	output, stderr, code := runSlick(t, timeoutRoot, nil, "mutate", "--json", "--timeout", "100ms", "--max-mutants", "1", "--", "node", "test.cjs")
 	document := decodeMutation(t, output)
 	if code != 1 || stderr != "" || document.Mutation == nil || document.Mutation.TimedOut != 1 {
-		t.Fatalf("timeout exit %d, stderr %q, output %+v", code, stderr, document)
+		t.Fatalf("timeout exit %d, stderr %q, output %s", code, stderr, output)
 	}
 
 	failedRoot := mutationProject(t, `process.exit(1);`)
@@ -82,7 +82,7 @@ func TestMutationMarksUncoveredMutantsWithoutRunningThem(t *testing.T) {
 	output, stderr, code := runSlick(t, root, nil, "mutate", "--json", "--coverage", coverage, "--max-mutants", "1", "--", "node", "test.cjs")
 	document := decodeMutation(t, output)
 	if code != 0 || stderr != "" || !document.Success || document.Mutation == nil || document.Mutation.NotCovered != 1 || document.Mutation.Killed != 0 || document.Mutation.Survived != 0 {
-		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
 	}
 }
 

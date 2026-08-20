@@ -41,9 +41,30 @@ function analyzeDeadCode(program, projectRoot, ts, descriptions, entryPaths) {
       const packageJSON = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
       collectTargets(packageJSON.exports ?? packageJSON.module ?? packageJSON.main ?? packageJSON.bin);
     } catch {}
-    for (const target of targets) {
+    const options = program.getCompilerOptions();
+    const rootDir = path.resolve(options.rootDir ?? program.getCommonSourceDirectory());
+    const outDir = options.outDir ? path.resolve(options.outDir) : undefined;
+    function sourceCandidates(target) {
       const absolute = path.resolve(projectRoot, target);
-      if (authoredByPath.has(absolute) && !entries.includes(absolute)) entries.push(absolute);
+      const extension = path.extname(absolute);
+      const sourceExtensions = extension === ".mjs" ? [".mts"] : extension === ".cjs" ? [".cts"] : [".ts", ".tsx"];
+      const candidates = [absolute];
+      if (outDir) {
+        const relative = path.relative(outDir, absolute);
+        if (relative !== ".." && !relative.startsWith(`..${path.sep}`)) {
+          for (const sourceExtension of sourceExtensions) candidates.push(path.join(rootDir, relative.slice(0, -extension.length) + sourceExtension));
+        }
+      }
+      const normalized = path.relative(projectRoot, absolute).split(path.sep);
+      if (normalized[0] === "dist") {
+        for (const sourceExtension of sourceExtensions) candidates.push(path.join(projectRoot, "src", ...normalized.slice(1)).slice(0, -extension.length) + sourceExtension);
+      }
+      return candidates;
+    }
+    for (const target of targets) {
+      for (const absolute of sourceCandidates(target)) {
+        if (authoredByPath.has(absolute) && !entries.includes(absolute)) entries.push(absolute);
+      }
     }
     if (entries.length === 0) {
       const indexes = authored.filter((sourceFile) => ["index.ts", "index.tsx", "index.mts", "index.cts"].includes(path.basename(sourceFile.fileName)));

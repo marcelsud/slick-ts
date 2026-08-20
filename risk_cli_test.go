@@ -75,6 +75,22 @@ func TestRiskWeightsAndThresholdAreExplicitAndInvalidBaseIsStructured(t *testing
 	}
 }
 
+func TestRiskFollowsFileRenames(t *testing.T) {
+	root, base := riskProject(t)
+	runGit(t, root, "mv", "src/main.ts", "src/renamed.ts")
+	runGit(t, root, "commit", "-m", "rename")
+	output, stderr, code := runSlick(t, root, nil, "risk", "--json", "--base", base)
+	document := decodeRisk(t, output)
+	if code != 0 || stderr != "" || document.Risk == nil || len(document.Risk.Results) != 2 {
+		t.Fatalf("exit %d, stderr %q, output %s", code, stderr, output)
+	}
+	for _, result := range document.Risk.Results {
+		if result.CommitCount < 3 {
+			t.Fatalf("rename history was truncated: %+v", result)
+		}
+	}
+}
+
 func riskProject(t *testing.T) (string, string) {
 	t.Helper()
 	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{

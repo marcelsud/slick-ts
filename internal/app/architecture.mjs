@@ -87,7 +87,9 @@ function analyzeArchitecture(program, projectRoot, ts, configPath) {
         typeOnly = isTypeOnlyImport(node);
       } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
         specifier = node.moduleSpecifier;
-        typeOnly = node.isTypeOnly;
+        typeOnly = node.isTypeOnly ||
+          node.exportClause && ts.isNamedExports(node.exportClause) &&
+          node.exportClause.elements.length > 0 && node.exportClause.elements.every((element) => element.isTypeOnly);
         kind = "export";
       } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) {
         specifier = node.moduleReference.expression;
@@ -152,6 +154,22 @@ function analyzeArchitecture(program, projectRoot, ts, configPath) {
   const onStack = new Set();
   const state = new Map();
   const cycles = [];
+  function cyclePath(component) {
+    const allowed = new Set(component);
+    const start = [...component].sort()[0];
+    function walk(current, path) {
+      for (const target of adjacency.get(current) ?? []) {
+        if (!allowed.has(target)) continue;
+        if (target === start) return [...path, start];
+        if (!path.includes(target)) {
+          const found = walk(target, [...path, target]);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    }
+    return walk(start, [start]) ?? [start, start];
+  }
   function connect(node) {
     const current = { index, low: index };
     index++;
@@ -167,7 +185,7 @@ function analyzeArchitecture(program, projectRoot, ts, configPath) {
       let value;
       do { value = stack.pop(); onStack.delete(value); component.push(value); } while (value !== node);
       component.sort();
-      if (component.length > 1 || (adjacency.get(node) ?? []).includes(node)) cycles.push({ modules: component });
+      if (component.length > 1 || (adjacency.get(node) ?? []).includes(node)) cycles.push({ modules: cyclePath(component) });
     }
   }
   for (const module of modules) if (!state.has(module.path)) connect(module.path);

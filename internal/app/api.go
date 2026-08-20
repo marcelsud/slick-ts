@@ -3,6 +3,8 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -15,13 +17,16 @@ type APISnapshot struct {
 }
 
 type APIChange struct {
-	Symbol   string `json:"symbol"`
-	Kind     string `json:"kind"`
-	Breaking bool   `json:"breaking"`
-	Detail   string `json:"detail"`
+	Symbol   string          `json:"symbol"`
+	Kind     string          `json:"kind"`
+	Breaking bool            `json:"breaking"`
+	Detail   string          `json:"detail"`
+	Old      *SymbolContract `json:"old,omitempty"`
+	New      *SymbolContract `json:"new,omitempty"`
+	Location *SourceLocation `json:"location,omitempty"`
 }
 
-func buildAPISnapshot(analysis Analysis, entries []string) (APISnapshot, error) {
+func buildAPISnapshot(analysis Analysis, entries []string, projectRoot string) (APISnapshot, error) {
 	selected := []SymbolDescription{}
 	seen := map[string]struct{}{}
 	add := func(description SymbolDescription) {
@@ -55,8 +60,10 @@ func buildAPISnapshot(analysis Analysis, entries []string) (APISnapshot, error) 
 			add(description)
 		}
 	} else {
+		entryPaths := apiEntryPaths(projectRoot, analysis.Descriptions)
 		for _, description := range analysis.Descriptions {
-			if description.Package == nil && description.Visibility == "exported" {
+			if description.Package == nil && description.Visibility == "exported" &&
+				(len(entryPaths) == 0 || entryPaths[description.Location.Path]) {
 				add(description)
 			}
 		}
@@ -67,6 +74,57 @@ func buildAPISnapshot(analysis Analysis, entries []string) (APISnapshot, error) 
 	}
 	sort.Slice(contracts, func(i, j int) bool { return contracts[i].CanonicalName < contracts[j].CanonicalName })
 	return APISnapshot{Version: apiSnapshotVersion, Contracts: contracts}, nil
+}
+func apiEntryPaths(projectRoot string, descriptions []SymbolDescription) map[string]bool {
+	content, err := os.ReadFile(filepath.Join(projectRoot, "package.json"))
+	if err != nil {
+		return nil
+	}
+	var packageJSON map[string]any
+	if json.Unmarshal(content, &packageJSON) != nil {
+		return nil
+	}
+	targets := []string{}
+	var collect func(any)
+	collect = func(value any) {
+		switch current := value.(type) {
+		case string:
+			targets = append(targets, current)
+		case []any:
+			for _, item := range current {
+				collect(item)
+			}
+		case map[string]any:
+			for _, item := range current {
+				collect(item)
+			}
+		}
+	}
+	if value, ok := packageJSON["exports"]; ok {
+		collect(value)
+	} else if value, ok := packageJSON["module"]; ok {
+		collect(value)
+	} else if value, ok := packageJSON["main"]; ok {
+		collect(value)
+	}
+	result := map[string]bool{}
+	for _, target := range targets {
+		relative := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(target, "./")))
+		withoutExtension := strings.TrimSuffix(relative, filepath.Ext(relative))
+		candidates := []string{withoutExtension}
+		if strings.HasPrefix(withoutExtension, "dist/") {
+			candidates = append(candidates, "src/"+strings.TrimPrefix(withoutExtension, "dist/"))
+		}
+		for _, description := range descriptions {
+			pathWithoutExtension := strings.TrimSuffix(description.Location.Path, filepath.Ext(description.Location.Path))
+			for _, candidate := range candidates {
+				if pathWithoutExtension == candidate {
+					result[description.Location.Path] = true
+				}
+			}
+		}
+	}
+	return result
 }
 
 func diffAPI(oldSnapshot, current APISnapshot) []APIChange {
@@ -113,6 +171,21 @@ func diffAPI(oldSnapshot, current APISnapshot) []APIChange {
 			changes = append(changes, APIChange{Symbol: name, Kind: "added_export", Detail: "export was added"})
 		}
 	}
+	for index := range changes {
+		if oldContract, ok := oldByName[changes[index].Symbol]; ok {
+			copy := oldContract
+			changes[index].Old = &copy
+		}
+		if newContract, ok := newByName[changes[index].Symbol]; ok {
+			copy := newContract
+			changes[index].New = &copy
+			location := newContract.Location
+			changes[index].Location = &location
+		} else if changes[index].Old != nil {
+			location := changes[index].Old.Location
+			changes[index].Location = &location
+		}
+	}
 	sort.Slice(changes, func(i, j int) bool {
 		if changes[i].Symbol != changes[j].Symbol {
 			return changes[i].Symbol < changes[j].Symbol
@@ -152,15 +225,23 @@ func signatureChanges(symbol string, oldContract, newContract SymbolContract) []
 	}
 	for _, oldSignature := range oldSignatures {
 		compatible := false
+		var matched SignatureDescription
 		for _, newSignature := range newSignatures {
 			if signatureCompatible(oldSignature, newSignature) {
 				compatible = true
+				matched = newSignature
 				break
 			}
 		}
 		if !compatible {
 			encoded, _ := json.Marshal(oldSignature)
 			changes = append(changes, APIChange{Symbol: symbol, Kind: "removed_or_incompatible_overload", Breaking: true, Detail: string(encoded)})
+			continue
+		}
+		oldJSON, _ := json.Marshal(oldSignature)
+		newJSON, _ := json.Marshal(matched)
+		if string(oldJSON) != string(newJSON) {
+			changes = append(changes, APIChange{Symbol: symbol, Kind: "compatible_signature_change", Detail: string(oldJSON) + " -> " + string(newJSON)})
 		}
 	}
 	return changes
