@@ -10,8 +10,8 @@ TypeScript syntax or a new runtime.
 
 ## Status
 
-`slick check`, `slick describe`, and `slick build` are available. Commands
-return human or deterministic versioned JSON output.
+`slick check`, `slick describe`, `slick build`, and `slick crap` are available.
+Commands return human or deterministic versioned JSON output.
 
 The analyzer also creates internal operational summaries for authored and package source.
 Each summary contains:
@@ -128,6 +128,26 @@ JSON diagnostics include the title, explanation, exact range, triggering fact,
 and repairs. TypeScript declaration internals do not produce Slick diagnostics
 until their values reach authored code.
 
+## Check change risk
+
+```sh
+./slick crap --coverage coverage/coverage-final.json --threshold 30 [path]
+./slick crap --json --coverage coverage/coverage-final.json --threshold 30 [path]
+```
+
+The command reads Istanbul `coverage-final.json`, computes cyclomatic
+complexity for each authored function, and assigns coverage statements to the
+innermost containing function. Its score is:
+
+```text
+CRAP = complexity² × (1 - coverage)³ + complexity
+```
+
+`--threshold` is the maximum allowed CRAP score and defaults to `30`. The
+command exits nonzero when any function exceeds it. JSON includes each
+function's canonical symbol, range, complexity, coverage fraction, and score.
+
+
 ## Describe a symbol
 
 ```sh
@@ -181,6 +201,7 @@ Structured failures use these `error.kind` values.
 - `unknown_symbol`
 - `ambiguous_symbol`
 - `emit_failure`
+- `coverage_failure`
 
 Slick uses these exit codes.
 
@@ -257,6 +278,7 @@ go vet ./...
 node --check internal/app/analyzer.mjs
 node --check internal/app/describe.mjs
 node --check internal/app/build.mjs
+node --check internal/app/crap.mjs
 node --check internal/app/packages.mjs
 node --check internal/app/strict.mjs
 node --check internal/app/operational.mjs
@@ -271,6 +293,7 @@ The public CLI tests cover these cases.
 - Interrupt cleanup
 - TypeScript-equivalent build output and source maps
 - Atomic output installation and rollback
+- CRAP complexity, coverage, and threshold behavior
 
 The operational tests combine these cases.
 

@@ -28,11 +28,15 @@ var describeSource string
 //go:embed build.mjs
 var buildSource string
 
+//go:embed crap.mjs
+var crapSource string
+
 type analyzerResponse struct {
 	Diagnostics  []Diagnostic        `json:"diagnostics"`
 	Graph        []operationalNode   `json:"graph"`
 	Descriptions []SymbolDescription `json:"descriptions"`
 	Outputs      []BuildOutput       `json:"outputs"`
+	CRAP         []CRAPResult        `json:"crap"`
 	Cache        CacheStats          `json:"cache"`
 	Failure      *Failure            `json:"failure,omitempty"`
 }
@@ -45,16 +49,21 @@ func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysi
 		return failed("missing_toolchain", "Node.js was not found in PATH")
 	}
 
-	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+buildSource+"\n"+analyzerSource)
-	cmd.Env = make([]string, 0, len(os.Environ())+2)
+	cmd := exec.CommandContext(ctx, node, "--input-type=module", "--eval", packagesSource+"\n"+operationalSource+"\n"+strictSource+"\n"+describeSource+"\n"+buildSource+"\n"+crapSource+"\n"+analyzerSource)
+	cmd.Env = make([]string, 0, len(os.Environ())+3)
 	for _, variable := range os.Environ() {
-		if !strings.HasPrefix(variable, "SLICK_CONFIG_PATH=") && !strings.HasPrefix(variable, "SLICK_EMIT_ROOT=") {
+		if !strings.HasPrefix(variable, "SLICK_CONFIG_PATH=") &&
+			!strings.HasPrefix(variable, "SLICK_EMIT_ROOT=") &&
+			!strings.HasPrefix(variable, "SLICK_COVERAGE_PATH=") {
 			cmd.Env = append(cmd.Env, variable)
 		}
 	}
 	cmd.Env = append(cmd.Env, "SLICK_CONFIG_PATH="+request.Config)
 	if request.EmitRoot != "" {
 		cmd.Env = append(cmd.Env, "SLICK_EMIT_ROOT="+request.EmitRoot)
+	}
+	if request.CoveragePath != "" {
+		cmd.Env = append(cmd.Env, "SLICK_COVERAGE_PATH="+request.CoveragePath)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -84,6 +93,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysi
 		Summaries:    summarize(response.Graph),
 		Descriptions: response.Descriptions,
 		Outputs:      response.Outputs,
+		CRAP:         response.CRAP,
 		Cache:        response.Cache,
 		Failure:      response.Failure,
 	}
@@ -95,6 +105,7 @@ func failed(kind, message string) Analysis {
 		Summaries:    []OperationalSummary{},
 		Descriptions: []SymbolDescription{},
 		Outputs:      []BuildOutput{},
+		CRAP:         []CRAPResult{},
 		Failure:      &Failure{Kind: kind, Message: message},
 	}
 }
