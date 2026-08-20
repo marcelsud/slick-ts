@@ -1,0 +1,9 @@
+{
+  "name": "slick-e2e-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "declaration-only": "file:packages/declaration-only",
+    "fixture-dependency": "file:packages/fixture-dependency"
+  }
+}

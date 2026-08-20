@@ -94,11 +94,17 @@ type describedPackage struct {
 type describedFact struct {
 	Name string `json:"name"`
 }
+type describedProvenance struct {
+	Symbol string      `json:"symbol"`
+	Path   string      `json:"path"`
+	Range  sourceRange `json:"range"`
+}
 
 type describedUnresolved struct {
-	Symbol  string            `json:"symbol"`
-	Reason  string            `json:"reason"`
-	Package *describedPackage `json:"package"`
+	Symbol     string                `json:"symbol"`
+	Reason     string                `json:"reason"`
+	Package    *describedPackage     `json:"package"`
+	Provenance []describedProvenance `json:"provenance"`
 }
 
 func TestDescribeLocalFunctionMethodAndNamespace(t *testing.T) {
