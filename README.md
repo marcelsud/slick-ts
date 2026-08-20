@@ -10,8 +10,9 @@ TypeScript syntax or a new runtime.
 
 ## Status
 
-`slick check`, `slick describe`, `slick build`, and `slick crap` are available.
-Commands return human or deterministic versioned JSON output.
+Slick provides project checks, contract inspection, TypeScript builds, and
+deterministic quality-analysis commands. Every command has human and versioned
+JSON output.
 
 The analyzer also creates internal operational summaries for authored and package source.
 Each summary contains:
@@ -128,7 +129,44 @@ JSON diagnostics include the title, explanation, exact range, triggering fact,
 and repairs. TypeScript declaration internals do not produce Slick diagnostics
 until their values reach authored code.
 
-## Check change risk
+## Check complexity
+
+```sh
+./slick complexity [--json] [--threshold 10] [path]
+```
+
+The command measures cyclomatic complexity for authored functions, methods,
+accessors, constructors, and bound function expressions. It uses the same
+function inventory and decision rules as `slick crap`. Nested callables keep
+their own scores. Coverage is not required.
+
+Counted decisions are loops, `case` clauses, `catch` clauses, conditionals,
+logical operators, and logical assignments.
+
+`--threshold` is the maximum allowed complexity and defaults to `10`. A score
+equal to the threshold passes. A score above it fails. The command exits
+nonzero only when a function exceeds the threshold or analysis fails. JSON
+includes each function's canonical symbol, exact range, and complexity.
+
+## Report maintainability inputs
+
+```sh
+./slick maintainability [--json] [--threshold 20] [path]
+```
+
+Slick reports cyclomatic complexity, logical LOC, Halstead operator and operand
+counts, volume, and the normalized maintainability index. A zero threshold only
+reports values. A positive threshold fails functions below it. Formatting and
+comments do not change the token counts or canonical LOC.
+
+```text
+MI = max(0, (171 - 5.2 ln(Halstead volume) - 0.23 cyclomatic - 16.2 ln(LOC)) * 100 / 171)
+```
+
+
+
+
+## Check C.R.A.P.
 
 ```sh
 ./slick crap --coverage coverage/coverage-final.json --threshold 30 [path]
@@ -147,6 +185,33 @@ CRAP = complexity² × (1 - coverage)³ + complexity
 command exits nonzero when any function exceeds it. JSON includes each
 function's canonical symbol, range, complexity, coverage fraction, and score.
 
+## Check coverage quality
+
+```sh
+./slick coverage --coverage coverage/coverage-final.json [--json] [--base ref] \
+  [--branch-threshold 80] [--changed-line-threshold 90] \
+  [--uncovered-complexity-threshold 10] [path]
+```
+
+The command validates Istanbul branch data, reports project and file branch
+coverage, and assigns uncovered branch decisions to the innermost function.
+When `--base` is set, Slick reads changed lines from Git and scores executable
+changed lines only. Threshold equality passes. Missing coverage and invalid Git
+references return structured failures.
+
+## Rank changed code
+
+```sh
+./slick risk --base ref [--history 90d] [--coverage coverage-final.json] \
+  [--config slick.risk.json] [--json] [path]
+```
+
+Risk ranking combines changed lines, Git churn, author count, complexity,
+coverage, and module fan-in. `slick.risk.json` contains explicit weights and an
+optional threshold. Missing coverage and shallow history stay visible instead
+of becoming zero.
+
+
 
 ## Describe a symbol
 
@@ -164,6 +229,81 @@ package identity where applicable. Human output renders the same document.
 Short names are accepted only when unambiguous. Unknown and ambiguous names
 return nonzero with deterministic `error.alternatives`.
 
+## Check declared resource bounds
+
+```sh
+./slick bounds [--json] [--contracts slick.contracts.json] [path]
+```
+
+The contract file maps canonical symbols or aliases to `timeoutMs`,
+`maxAttempts`, `maxItems`, and `maxConcurrency`. Slick propagates known values
+through calls, branches, and finite loops. Data-dependent loops, recursion, and
+unresolved calls remain unknown. Unknown is not treated as a pass. `describe`
+uses the same bound result when the default contract file exists.
+
+
+## Diff public contracts
+
+```sh
+./slick api snapshot --output slick-api.json [--entry export]... [path]
+./slick api diff --baseline slick-api.json [--json] [path]
+```
+
+Snapshots contain sorted exported signatures and operational contracts. Diff
+uses structured types and directional compatibility checks. Removed exports,
+narrower parameters, wider returns, removed overloads, new errors or effects,
+reduced visibility, and complete-to-partial changes are breaking.
+
+
+## Find unreachable code
+
+```sh
+./slick dead-code [--json] [--entry file]... [path]
+```
+
+Slick follows TypeScript exports, aliases, calls, classes, and bound callbacks
+from each entry module. A project with no explicit entry uses an authored
+`index.ts` variant. Unknown dynamic imports remain unknown and suppress dead
+findings that Slick cannot prove.
+
+## Enforce dependency architecture
+
+```sh
+./slick architecture [--json] [--config slick.architecture.json] [path]
+```
+
+The rule file assigns source globs to named layers and lists which layers each
+layer may import. Slick reports TypeScript-resolved edges, runtime and type-only
+cycles, fan-in, fan-out, layer violations, and unknown dynamic imports.
+`maxFanIn`, `maxFanOut`, and `allowTypeOnlyCycles` control project-wide rules.
+
+## Find duplicated implementation blocks
+
+```sh
+./slick duplication [--json] [--min-nodes 20] [--min-occurrences 2] [path]
+```
+
+Slick normalizes authored function blocks, including local identifier names,
+then groups matching AST fingerprints. Operators, control flow, property names,
+called names, and literal values remain significant. Tests, dependencies,
+declarations, snapshots, and emitted output are excluded.
+
+## Measure test sensitivity
+
+```sh
+./slick mutate [--json] [--timeout 30s] [--max-mutants 200] \
+  [--coverage coverage-final.json] [path] -- <test command> [args...]
+```
+
+Slick creates deterministic first-order TypeScript mutants in an isolated
+project. It type-checks each mutant, runs the supplied command without a shell,
+enforces a timeout, and reports killed, survived, invalid, timed-out, and
+uncovered mutants. The original project is never edited.
+
+
+
+
+
 ## Build a project
 
 ```sh
@@ -179,6 +319,19 @@ runtime, or add an Effect dependency.
 Emit is staged before installation. A TypeScript error, Slick error, interrupt,
 emit failure, or output-install failure leaves pre-existing outputs unchanged.
 Successful JSON output lists installed files relative to the project.
+
+## Check emitted artifacts
+
+```sh
+./slick artifacts [--json] [--max-total-bytes N] [--max-file-bytes N] \
+  [--deny-runtime-import package] [path]
+```
+
+The command stages the same TypeScript output as `slick build`, then checks
+total bytes, per-file bytes, and bare runtime package imports. Rejected
+artifacts are not installed. Existing outputs remain unchanged. Repeat
+`--deny-runtime-import` to block more than one package.
+
 
 ## Development loop
 
@@ -202,6 +355,15 @@ Structured failures use these `error.kind` values.
 - `ambiguous_symbol`
 - `emit_failure`
 - `coverage_failure`
+- `api_snapshot_failure`
+- `api_baseline_failure`
+- `git_failure`
+- `risk_configuration`
+- `mutation_failure`
+- `test_command_failure`
+- `bounds_configuration`
+- `entry_configuration`
+- `architecture_configuration`
 
 Slick uses these exit codes.
 
@@ -278,7 +440,17 @@ go vet ./...
 node --check internal/app/analyzer.mjs
 node --check internal/app/describe.mjs
 node --check internal/app/build.mjs
+node --check internal/app/artifacts.mjs
+node --check internal/app/complexity.mjs
+node --check internal/app/coverage.mjs
 node --check internal/app/crap.mjs
+node --check internal/app/maintainability.mjs
+node --check internal/app/risk.mjs
+node --check internal/app/mutation.mjs
+node --check internal/app/bounds.mjs
+node --check internal/app/duplication.mjs
+node --check internal/app/architecture.mjs
+node --check internal/app/deadcode.mjs
 node --check internal/app/packages.mjs
 node --check internal/app/strict.mjs
 node --check internal/app/operational.mjs
@@ -293,6 +465,7 @@ The public CLI tests cover these cases.
 - Interrupt cleanup
 - TypeScript-equivalent build output and source maps
 - Atomic output installation and rollback
+- Standalone complexity thresholds and decision coverage
 - CRAP complexity, coverage, and threshold behavior
 
 The operational tests combine these cases.

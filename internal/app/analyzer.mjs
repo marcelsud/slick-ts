@@ -7,8 +7,8 @@ const supportedTypeScript = "5.9.3";
 const configPath = path.resolve(process.env.SLICK_CONFIG_PATH);
 const projectRoot = path.dirname(configPath);
 
-function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }, descriptions = [], outputs = [], crap = []) {
-  return JSON.stringify({ diagnostics, graph, cache, descriptions, outputs, crap, ...(failure && { failure }) });
+function response(diagnostics = [], failure, graph = [], cache = { hits: 0, misses: 0 }, descriptions = [], outputs = [], crap = [], complexity = [], coverageReport, artifacts, deadCode, architecture, duplication, maintainability = [], riskInputs = [], mutants = [], bounds) {
+  return JSON.stringify({ diagnostics, graph, cache, descriptions, outputs, crap, complexity, maintainability, riskInputs, mutants, ...(coverageReport && { coverageReport }), ...(artifacts && { artifacts }), ...(deadCode && { deadCode }), ...(architecture && { architecture }), ...(duplication && { duplication }), ...(bounds && { bounds }), ...(failure && { failure }) });
 }
 
 function failure(kind, message, diagnostics = []) {
@@ -159,19 +159,69 @@ const slickDiagnostics = projectReferenceFailure
 const build = projectReferenceFailure
   ? { diagnostics: [], outputs: [] }
   : emitBuild(program, ts, diagnostics, slickDiagnostics);
+const collected = projectReferenceFailure
+  ? { results: [], functionsByFile: new Map() }
+  : collectComplexity(program, projectRoot, ts, operational.graph);
 const crap = projectReferenceFailure
   ? { results: [] }
-  : analyzeCrap(program, projectRoot, ts, operational.graph, process.env.SLICK_COVERAGE_PATH);
+  : analyzeCrap(program, projectRoot, ts, operational.graph, process.env.SLICK_COVERAGE_PATH, collected);
+const coverageQuality = projectReferenceFailure
+  ? { report: undefined }
+  : analyzeCoverageQuality(program, projectRoot, ts, process.env.SLICK_COVERAGE_PATH, collected, crap);
+const artifacts = projectReferenceFailure
+  ? undefined
+  : analyzeArtifacts(ts, process.env.SLICK_EMIT_ROOT, build.outputs);
+let deadEntries = [];
+try {
+  deadEntries = JSON.parse(process.env.SLICK_DEAD_ENTRIES ?? "[]");
+} catch {}
+const deadCode = projectReferenceFailure
+  ? { report: undefined }
+  : analyzeDeadCode(program, projectRoot, ts, descriptions, deadEntries);
+const architecture = projectReferenceFailure
+  ? { report: undefined }
+  : analyzeArchitecture(program, projectRoot, ts, process.env.SLICK_ARCHITECTURE_CONFIG);
+const duplication = projectReferenceFailure
+  ? { report: undefined }
+  : analyzeDuplication(
+      program,
+      projectRoot,
+      ts,
+      Number(process.env.SLICK_MIN_CLONE_NODES ?? 20),
+      Number(process.env.SLICK_MIN_CLONE_OCCURRENCES ?? 2),
+    );
+const maintainability = projectReferenceFailure
+  ? { results: [] }
+  : analyzeMaintainability(ts, collected) ?? { results: [] };
+const riskInputs = projectReferenceFailure
+  ? []
+  : analyzeRiskInputs(program, projectRoot, ts, collected, crap);
+const mutants = projectReferenceFailure
+  ? []
+  : analyzeMutants(program, projectRoot, ts, collected);
+const bounds = projectReferenceFailure
+  ? { report: undefined }
+  : analyzeBounds(resolved.program, projectRoot, ts, operational.graph, descriptions, process.env.SLICK_BOUNDS_CONFIG);
 process.stdout.write(
   response(
     normalize([...diagnostics, ...slickDiagnostics, ...build.diagnostics]),
     projectReferenceFailure
       ? { kind: "project_reference", message: "a referenced TypeScript project could not be checked" }
-      : build.failure ?? crap.failure,
+      : build.failure ?? crap.failure ?? coverageQuality.failure ?? deadCode.failure ?? architecture.failure ?? bounds.failure,
     operational.graph,
     operational.cache,
     descriptions,
     build.outputs,
     crap.results,
+    collected.results,
+    coverageQuality.report,
+    artifacts,
+    deadCode.report,
+    architecture.report,
+    duplication.report,
+    maintainability.results,
+    riskInputs,
+    mutants,
+    bounds.report,
   ),
 );

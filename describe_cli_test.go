@@ -37,6 +37,7 @@ type describedContract struct {
 	Effects        []describedFact          `json:"effects"`
 	Completeness   string                   `json:"completeness"`
 	Unresolved     []describedUnresolved    `json:"unresolved"`
+	Bounds         *boundResult             `json:"bounds"`
 }
 
 type sourceLocation struct {
