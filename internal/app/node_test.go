@@ -74,6 +74,7 @@ func TestNodeAnalyzerIgnoresInheritedEmitRoot(t *testing.T) {
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 	emitRoot := t.TempDir()
 	t.Setenv("SLICK_EMIT_ROOT", emitRoot)
+	t.Setenv("SLICK_COVERAGE_PATH", filepath.Join(root, "missing-coverage.json"))
 
 	result := (NodeAnalyzer{}).Analyze(context.Background(), AnalyzeRequest{Config: filepath.Join(root, "tsconfig.json")})
 	if result.Failure != nil || len(result.Outputs) != 0 {

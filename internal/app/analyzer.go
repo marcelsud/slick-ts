@@ -36,8 +36,9 @@ type CacheStats struct {
 	Misses int `json:"misses"`
 }
 type AnalyzeRequest struct {
-	Config   string
-	EmitRoot string
+	Config       string
+	EmitRoot     string
+	CoveragePath string
 }
 
 type BuildOutput struct {
@@ -50,6 +51,7 @@ type Analysis struct {
 	Summaries    []OperationalSummary `json:"summaries"`
 	Descriptions []SymbolDescription  `json:"descriptions"`
 	Outputs      []BuildOutput        `json:"outputs"`
+	CRAP         []CRAPResult         `json:"crap"`
 	Cache        CacheStats           `json:"cache"`
 	Failure      *Failure             `json:"failure,omitempty"`
 }

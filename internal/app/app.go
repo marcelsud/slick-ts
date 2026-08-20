@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,12 +24,15 @@ type Document struct {
 	Diagnostics []Diagnostic    `json:"diagnostics"`
 	Contract    *SymbolContract `json:"contract,omitempty"`
 	Outputs     []string        `json:"outputs,omitempty"`
+	Threshold   float64         `json:"threshold,omitempty"`
+	Coverage    string          `json:"coverage,omitempty"`
+	Functions   []CRAPResult    `json:"functions,omitempty"`
 	Error       *Failure        `json:"error,omitempty"`
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: slick <check|describe|build> [options]")
+		fmt.Fprintln(stderr, "usage: slick <check|describe|build|crap> [options]")
 		return 2
 	}
 	switch args[0] {
@@ -38,8 +42,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer 
 		return runDescribe(ctx, args, stdout, stderr, analyzer)
 	case "build":
 		return runBuild(ctx, args, stdout, stderr, analyzer)
+	case "crap":
+		return runCRAP(ctx, args, stdout, stderr, analyzer)
 	default:
-		fmt.Fprintln(stderr, "usage: slick <check|describe|build> [options]")
+		fmt.Fprintln(stderr, "usage: slick <check|describe|build|crap> [options]")
 		return 2
 	}
 }
@@ -209,6 +215,70 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer, anal
 			doc.Success = true
 			doc.Outputs = displayOutputPaths(projectRoot, analysis.Outputs)
 		}
+	}
+	writeDocument(stdout, stderr, doc, *jsonOutput)
+	if doc.Success {
+		return 0
+	}
+	return 1
+}
+
+func runCRAP(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
+	flags := flag.NewFlagSet("slick crap", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "write versioned JSON")
+	coverageFlag := flags.String("coverage", "coverage/coverage-final.json", "read Istanbul coverage JSON")
+	threshold := flags.Float64("threshold", 30, "maximum allowed CRAP score")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() > 1 ||
+		*threshold < 0 || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) {
+		if err == nil {
+			fmt.Fprintln(stderr, "usage: slick crap [--json] [--coverage file] [--threshold score] [path]")
+		}
+		return 2
+	}
+	projectPath := "."
+	if flags.NArg() == 1 {
+		projectPath = flags.Arg(0)
+	}
+	config, err := findConfig(projectPath)
+	if err != nil {
+		doc := Document{
+			Version:     documentVersion,
+			Command:     "crap",
+			Diagnostics: []Diagnostic{},
+			Threshold:   *threshold,
+			Error:       &Failure{Kind: "missing_configuration", Message: err.Error()},
+		}
+		writeDocument(stdout, stderr, doc, *jsonOutput)
+		return 1
+	}
+	projectRoot := filepath.Dir(config)
+	coveragePath := *coverageFlag
+	if !filepath.IsAbs(coveragePath) {
+		coveragePath = filepath.Join(projectRoot, coveragePath)
+	}
+	coveragePath = filepath.Clean(coveragePath)
+	displayCoverage, err := filepath.Rel(projectRoot, coveragePath)
+	if err != nil {
+		displayCoverage = coveragePath
+	}
+
+	analysis := analyzer.Analyze(ctx, AnalyzeRequest{Config: config, CoveragePath: coveragePath})
+	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
+		return 130
+	}
+	doc := Document{
+		Version:     documentVersion,
+		Command:     "crap",
+		Project:     "tsconfig.json",
+		Diagnostics: analysis.Diagnostics,
+		Threshold:   *threshold,
+		Coverage:    filepath.ToSlash(displayCoverage),
+		Error:       analysis.Failure,
+	}
+	if analysis.Failure == nil && !hasErrors(analysis.Diagnostics) {
+		doc.Functions = analysis.CRAP
+		doc.Success = len(failingCRAP(analysis.CRAP, *threshold)) == 0
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -482,6 +552,26 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 	}
 	for _, output := range doc.Outputs {
 		fmt.Fprintln(stdout, "emitted:", output)
+	}
+	if doc.Command == "crap" && doc.Error == nil {
+		for _, result := range doc.Functions {
+			status := "ok"
+			if result.Score > doc.Threshold {
+				status = "fail"
+			}
+			fmt.Fprintf(
+				stdout,
+				"%s:%d:%d - %s CRAP %.2f (complexity %d, coverage %.1f%%): %s\n",
+				result.Path,
+				result.Range.Start.Line,
+				result.Range.Start.Column,
+				status,
+				result.Score,
+				result.Complexity,
+				result.Coverage*100,
+				result.Symbol,
+			)
+		}
 	}
 	if doc.Error != nil {
 		fmt.Fprintf(stderr, "slick: %s: %s\n", doc.Error.Kind, doc.Error.Message)
