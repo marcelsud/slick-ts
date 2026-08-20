@@ -25,25 +25,47 @@ function runtimeImports(sourceFile, ts) {
     if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) return true;
     return node.exportClause.elements.some((element) => !element.isTypeOnly);
   }
+  function importNames(node) {
+    const clause = node.importClause;
+    if (!clause) return [];
+    const names = [];
+    if (clause.name) names.push("default");
+    const bindings = clause.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) names.push("*");
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        if (!element.isTypeOnly) names.push((element.propertyName ?? element.name).text);
+      }
+    }
+    return names;
+  }
+
+  function exportNames(node) {
+    if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) return ["*"];
+    return node.exportClause.elements
+      .filter((element) => !element.isTypeOnly)
+      .map((element) => (element.propertyName ?? element.name).text);
+  }
+
   function visit(node) {
     if (ts.isImportDeclaration(node) && importHasRuntimeValue(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier });
+      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier, names: importNames(node) });
     } else if (
       ts.isExportDeclaration(node) &&
       exportHasRuntimeValue(node) &&
       node.moduleSpecifier &&
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
-      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier });
+      imports.push({ specifier: node.moduleSpecifier.text, kind: "import", usage: node.moduleSpecifier, names: exportNames(node) });
     } else if (
       ts.isCallExpression(node) &&
       node.arguments.length === 1 &&
       ts.isStringLiteral(node.arguments[0])
     ) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-        imports.push({ specifier: node.arguments[0].text, kind: "import", usage: node.arguments[0] });
+        imports.push({ specifier: node.arguments[0].text, kind: "import", usage: node.arguments[0], names: ["*"] });
       } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
-        imports.push({ specifier: node.arguments[0].text, kind: "require", usage: node.arguments[0] });
+        imports.push({ specifier: node.arguments[0].text, kind: "require", usage: node.arguments[0], names: ["*"] });
       }
     }
     ts.forEachChild(node, visit);
@@ -170,7 +192,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     pendingSources.push({ record, fileName: resolved });
   }
 
-  function addPackage(specifier, containingFile, kind, mode) {
+  function addPackage(specifier, containingFile, kind, mode, requestedNames = []) {
     const name = packageNameFromSpecifier(specifier);
     if (!name || name === "." || name === "..") return;
     const declarationFile = resolvedModule(specifier, containingFile, parsed.options, mode)?.resolvedFileName;
@@ -188,15 +210,23 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     const conditions = conditionsFor(mode);
     const key = `${packageInfo.root}\0${exportPath}\0${mode ?? "default"}`;
     const existing = recordsByKey.get(key);
-    if (existing) return existing;
+    if (existing) {
+      for (const requested of requestedNames) existing.requestedNames.add(requested);
+      return existing;
+    }
 
     const selected = exportedTarget(packageInfo.value, exportPath, conditions);
     const unresolvedTarget = selected?.target ? path.resolve(packageInfo.root, selected.target) : undefined;
-    const implementationFile = runtimeFile
+    const implementationCandidate = runtimeFile
       ? path.resolve(runtimeFile)
       : unresolvedTarget ? existingSource(unresolvedTarget) : undefined;
+    const implementationFile = implementationCandidate &&
+      fs.existsSync(implementationCandidate) &&
+      ![".d.ts", ".d.mts", ".d.cts"].some((suffix) => implementationCandidate.endsWith(suffix))
+      ? implementationCandidate
+      : undefined;
     const extension = implementationFile ? path.extname(implementationFile) : "";
-    const sourceAvailable = implementationFile && ![".d.ts", ".d.mts", ".d.cts", ".node"].some((suffix) => implementationFile.endsWith(suffix));
+    const sourceAvailable = implementationFile && extension !== ".node";
     const reason = extension === ".node" ? "native_addon" : sourceAvailable ? undefined : "declaration_only";
     const record = {
       name,
@@ -209,6 +239,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
       implementationFile,
       reason,
       sourceSet: new Set(),
+      requestedNames: new Set(requestedNames),
     };
     recordsByKey.set(key, record);
     records.push(record);
@@ -232,6 +263,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
           sourceFile.fileName,
           imported.kind,
           resolutionMode(sourceFile, imported.usage, imported.kind),
+          imported.names,
         );
       }
     }
@@ -257,7 +289,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
           addSource(record, resolved);
         }
       } else if (!imported.specifier.startsWith("node:")) {
-        addPackage(imported.specifier, fileName, imported.kind, mode);
+        addPackage(imported.specifier, fileName, imported.kind, mode, imported.names);
       }
     }
   }
@@ -273,6 +305,7 @@ function resolvePackageImplementations(program, parsed, projectRoot, ts) {
     }
     record.integrity = `sha256-${hash.digest("base64")}`;
     record.sources = [...record.sourceSet].sort();
+    record.requestedNames = [...record.requestedNames].sort();
     record.cacheKey = JSON.stringify({
       schema: analysisSchemaVersion,
       package: record.name,

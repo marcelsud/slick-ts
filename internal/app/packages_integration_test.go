@@ -92,7 +92,7 @@ func TestPackageSummaryCacheReusesAndInvalidatesEntries(t *testing.T) {
 
 	first := analyzePackageFixture(t, config)
 	second := analyzePackageFixture(t, config)
-	if first.Cache.Misses != 2 || second.Cache.Hits != 2 || second.Cache.Misses != 0 {
+	if first.Cache.Misses != 3 || second.Cache.Hits != 3 || second.Cache.Misses != 0 {
 		t.Fatalf("cache first=%+v second=%+v", first.Cache, second.Cache)
 	}
 	firstJSON, _ := json.Marshal(first.Summaries)
@@ -122,7 +122,7 @@ func TestPackageSummaryCacheReusesAndInvalidatesEntries(t *testing.T) {
 		}
 	}
 	invalidated := analyzePackageFixture(t, config)
-	if invalidated.Cache.Misses != 2 || invalidated.Cache.Hits != 0 {
+	if invalidated.Cache.Misses != 3 || invalidated.Cache.Hits != 0 {
 		t.Fatalf("schema change did not invalidate cache: %+v", invalidated.Cache)
 	}
 
@@ -186,6 +186,26 @@ func TestPackageCacheFailureFallsBackToAnalysis(t *testing.T) {
 	result := analyzePackageFixture(t, config)
 	request := summaryNamed(t, result.Summaries, "src/main.ts::useRequest")
 	assertFactNames(t, request.Effects, "network")
+}
+
+func TestPackageMissingNamedExportRemainsTypeScriptDiagnostic(t *testing.T) {
+	root, config := packageFixture(t)
+	writeTestFile(t, filepath.Join(root, "src", "main.ts"), `import { missing } from "demo"; missing();`)
+	compiler, err := filepath.Abs(filepath.Join("..", "..", "node_modules", "typescript", "lib", "typescript.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
+	result := (NodeAnalyzer{}).Analyze(context.Background(), config)
+	if result.Failure != nil {
+		t.Fatalf("invalid import became analyzer failure: %+v", result.Failure)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Source == "typescript" && diagnostic.Code == 2305 {
+			return
+		}
+	}
+	t.Fatalf("missing TS2305 diagnostic: %+v", result.Diagnostics)
 }
 
 func packageFixture(t *testing.T) (string, string) {

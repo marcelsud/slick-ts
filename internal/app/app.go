@@ -15,20 +15,32 @@ import (
 const documentVersion = 1
 
 type Document struct {
-	Version     int          `json:"version"`
-	Command     string       `json:"command"`
-	Success     bool         `json:"success"`
-	Project     string       `json:"project,omitempty"`
-	Diagnostics []Diagnostic `json:"diagnostics"`
-	Error       *Failure     `json:"error,omitempty"`
+	Version     int             `json:"version"`
+	Command     string          `json:"command"`
+	Success     bool            `json:"success"`
+	Project     string          `json:"project,omitempty"`
+	Diagnostics []Diagnostic    `json:"diagnostics"`
+	Contract    *SymbolContract `json:"contract,omitempty"`
+	Error       *Failure        `json:"error,omitempty"`
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
-	if len(args) == 0 || args[0] != "check" {
-		fmt.Fprintln(stderr, "usage: slick check [--json] [path]")
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: slick <check|describe> [options]")
 		return 2
 	}
+	switch args[0] {
+	case "check":
+		return runCheck(ctx, args, stdout, stderr, analyzer)
+	case "describe":
+		return runDescribe(ctx, args, stdout, stderr, analyzer)
+	default:
+		fmt.Fprintln(stderr, "usage: slick <check|describe> [options]")
+		return 2
+	}
+}
 
+func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
 	flags := flag.NewFlagSet("slick check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "write versioned JSON")
@@ -66,6 +78,65 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer 
 		Project:     "tsconfig.json",
 		Diagnostics: analysis.Diagnostics,
 		Error:       analysis.Failure,
+	}
+	writeDocument(stdout, stderr, doc, *jsonOutput)
+	if doc.Success {
+		return 0
+	}
+	return 1
+}
+
+func runDescribe(ctx context.Context, args []string, stdout, stderr io.Writer, analyzer Analyzer) int {
+	flags := flag.NewFlagSet("slick describe", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "write versioned JSON")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() < 1 || flags.NArg() > 2 {
+		if err == nil {
+			fmt.Fprintln(stderr, "usage: slick describe [--json] <symbol> [path]")
+		}
+		return 2
+	}
+	query := flags.Arg(0)
+	path := "."
+	if flags.NArg() == 2 {
+		path = flags.Arg(1)
+	}
+	config, err := findConfig(path)
+	if err != nil {
+		doc := Document{
+			Version:     documentVersion,
+			Command:     "describe",
+			Diagnostics: []Diagnostic{},
+			Error:       &Failure{Kind: "missing_configuration", Message: err.Error()},
+		}
+		writeDocument(stdout, stderr, doc, *jsonOutput)
+		return 1
+	}
+
+	analysis := analyzer.Analyze(ctx, config)
+	if ctx.Err() != nil || analysis.Failure != nil && analysis.Failure.Kind == "interrupted" {
+		return 130
+	}
+	doc := Document{
+		Version:     documentVersion,
+		Command:     "describe",
+		Project:     "tsconfig.json",
+		Diagnostics: analysis.Diagnostics,
+		Error:       analysis.Failure,
+	}
+	if analysis.Failure == nil {
+		description, alternatives, kind := resolveDescription(query, analysis.Descriptions)
+		if kind == "" {
+			contract := contractFor(description, analysis.Summaries)
+			doc.Contract = &contract
+			doc.Success = true
+		} else {
+			message := fmt.Sprintf("symbol %q was not found", query)
+			if kind == "ambiguous_symbol" {
+				message = fmt.Sprintf("symbol %q is ambiguous", query)
+			}
+			doc.Error = &Failure{Kind: kind, Message: message, Alternatives: alternatives}
+		}
 	}
 	writeDocument(stdout, stderr, doc, *jsonOutput)
 	if doc.Success {
@@ -144,7 +215,43 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 		}
 		fmt.Fprintf(stdout, "%s%s %s%d: %s\n", location, diagnostic.Category, prefix, diagnostic.Code, message)
 	}
+	if doc.Contract != nil {
+		writeContract(stdout, *doc.Contract)
+	}
 	if doc.Error != nil {
 		fmt.Fprintf(stderr, "slick: %s: %s\n", doc.Error.Kind, doc.Error.Message)
+		for _, alternative := range doc.Error.Alternatives {
+			fmt.Fprintln(stderr, "  ", alternative)
+		}
 	}
+}
+
+func writeContract(output io.Writer, contract SymbolContract) {
+	fmt.Fprintf(output, "%s (%s, %s)\n", contract.CanonicalName, contract.Kind, contract.Visibility)
+	fmt.Fprintln(output, "name:", contract.Name)
+	writeContractField(output, "location", contract.Location)
+	fmt.Fprintln(output, "documentation:", contract.Documentation)
+	writeContractField(output, "aliases", contract.Aliases)
+	writeContractField(output, "type parameters", contract.TypeParameters)
+	writeContractField(output, "parameters", contract.Parameters)
+	writeContractField(output, "signatures", contract.Signatures)
+	if contract.Return != nil {
+		writeContractField(output, "return", contract.Return)
+	}
+	writeContractField(output, "members", contract.Members)
+	if contract.Package != nil {
+		writeContractField(output, "package", contract.Package)
+	}
+	if contract.Execution != "" {
+		fmt.Fprintln(output, "execution:", contract.Execution)
+	}
+	writeContractField(output, "errors", contract.Errors)
+	writeContractField(output, "effects", contract.Effects)
+	fmt.Fprintln(output, "completeness:", contract.Completeness)
+	writeContractField(output, "unresolved", contract.Unresolved)
+}
+
+func writeContractField(output io.Writer, name string, value any) {
+	encoded, _ := json.Marshal(value)
+	fmt.Fprintf(output, "%s: %s\n", name, encoded)
 }

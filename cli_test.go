@@ -55,8 +55,9 @@ type position struct {
 }
 
 type failure struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
+	Kind         string   `json:"kind"`
+	Message      string   `json:"message"`
+	Alternatives []string `json:"alternatives"`
 }
 
 func TestMain(m *testing.M) {

@@ -21,8 +21,8 @@ Each summary contains:
 - Source provenance
 - Unresolved calls
 
-`slick check` does not expose operational summaries yet. A later
-`slick describe` command will define the public contract.
+`slick describe` exposes the same resolved signatures and operational summaries
+as a deterministic version 1 contract.
 
 ## Requirements
 
@@ -128,6 +128,21 @@ JSON diagnostics include the title, explanation, exact range, triggering fact,
 and repairs. TypeScript declaration internals do not produce Slick diagnostics
 until their values reach authored code.
 
+## Describe a symbol
+
+```sh
+./slick describe <symbol> [path]
+./slick describe --json <symbol> [path]
+```
+
+Slick resolves local functions, class methods, namespaces, and reachable
+dependency exports. The contract contains structured type parameters,
+parameters, and return types; execution mode; errors and effects with
+provenance; completeness and unresolved leaves; source location; and exact
+package identity where applicable. Human output renders the same document.
+
+Short names are accepted only when unambiguous. Unknown and ambiguous names
+return nonzero with deterministic `error.alternatives`.
 
 ## Failures and exit status
 
@@ -139,6 +154,8 @@ Structured failures use these `error.kind` values.
 - `unsupported_toolchain`
 - `project_reference`
 - `analyzer_failure`
+- `unknown_symbol`
+- `ambiguous_symbol`
 
 Slick uses these exit codes.
 
@@ -213,6 +230,7 @@ Run static checks.
 ```sh
 go vet ./...
 node --check internal/app/analyzer.mjs
+node --check internal/app/describe.mjs
 node --check internal/app/packages.mjs
 node --check internal/app/strict.mjs
 node --check internal/app/operational.mjs
