@@ -564,8 +564,13 @@ func analyzeOperationalFixture(t *testing.T, files map[string]string) Analysis {
 	}
 	t.Setenv("SLICK_TYPESCRIPT_PATH", compiler)
 	result := (NodeAnalyzer{}).Analyze(context.Background(), filepath.Join(root, "tsconfig.json"))
-	if result.Failure != nil || len(result.Diagnostics) != 0 {
+	if result.Failure != nil {
 		t.Fatalf("analysis failed: failure=%+v diagnostics=%+v", result.Failure, result.Diagnostics)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Source == "typescript" {
+			t.Fatalf("TypeScript analysis failed: %+v", diagnostic)
+		}
 	}
 	return result
 }

@@ -10,10 +10,10 @@ ownership without custom TypeScript syntax or a new runtime.
 
 ## Status
 
-`slick check` is available now. The command returns TypeScript diagnostics in
-human or versioned JSON output.
+`slick check` is available now. The command returns TypeScript and Slick
+diagnostics in human or versioned JSON output.
 
-The analyzer also creates internal operational summaries for authored source.
+The analyzer also creates internal operational summaries for authored and package source.
 Each summary contains:
 
 - Concrete errors and authority effects
@@ -64,12 +64,14 @@ The path can identify a directory, a source file, or a `tsconfig.json` file.
 Slick searches the path and its parent directories for the applicable
 `tsconfig.json`.
 
-Slick loads the configured project. Slick then runs TypeScript parsing,
-module resolution, and type checking. Slick does not emit JavaScript.
+Slick loads the configured project, runs TypeScript parsing, module resolution,
+and type checking, then rejects unsafe `any`, unchecked assertions, implicit
+truthiness, and unconsumed Promises. Slick does not emit JavaScript.
 
 ### Human output
 
-Human output keeps TypeScript diagnostic codes and messages.
+Human output preserves TypeScript diagnostics and renders Slick diagnostics with
+their semantic fact and concrete repair strategies.
 
 ```text
 src/main.ts:1:7 - error TS2322: Type 'number' is not assignable to type 'string'.
@@ -111,6 +113,22 @@ Paths use forward slashes and are relative to the project. Lines and columns
 start at 1. Offsets start at 0. An unchanged project has stable diagnostic
 order.
 
+### Strict checks
+
+Slick emits stable error codes for its initial rules.
+
+| Code | Rule |
+| ---: | --- |
+| `SLICK1001` | Unsafe explicit or authored-flow `any` |
+| `SLICK1002` | Unchecked type or non-null assertion |
+| `SLICK1003` | Non-boolean condition or logical operand |
+| `SLICK1004` | Promise not awaited, returned, joined, or transferred |
+
+JSON diagnostics include the title, explanation, exact range, triggering fact,
+and repairs. TypeScript declaration internals do not produce Slick diagnostics
+until their values reach authored code.
+
+
 ## Failures and exit status
 
 Structured failures use these `error.kind` values.
@@ -126,8 +144,8 @@ Slick uses these exit codes.
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | Project loading and TypeScript checking succeeded. |
-| `1` | TypeScript reported an error, or Slick could not analyze the project. |
+| `0` | TypeScript and Slick checking succeeded. |
+| `1` | TypeScript or Slick reported an error, or analysis failed. |
 | `2` | The command arguments were invalid. |
 | `130` | An interrupt stopped the command. |
 
@@ -196,6 +214,7 @@ Run static checks.
 go vet ./...
 node --check internal/app/analyzer.mjs
 node --check internal/app/packages.mjs
+node --check internal/app/strict.mjs
 node --check internal/app/operational.mjs
 ```
 

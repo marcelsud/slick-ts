@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const documentVersion = 1
@@ -129,7 +130,19 @@ func writeDocument(stdout, stderr io.Writer, doc Document, jsonOutput bool) {
 		if location != "" {
 			location += " - "
 		}
-		fmt.Fprintf(stdout, "%s%s TS%d: %s\n", location, diagnostic.Category, diagnostic.Code, diagnostic.Message)
+		prefix := "TS"
+		message := diagnostic.Message
+		if diagnostic.Source == "slick" {
+			prefix = "SLICK"
+			message = diagnostic.Title + ": " + diagnostic.Explanation
+			if diagnostic.Fact != "" {
+				message += " Fact: " + diagnostic.Fact + "."
+			}
+			if len(diagnostic.Repairs) > 0 {
+				message += " Repair: " + strings.Join(diagnostic.Repairs, "; ") + "."
+			}
+		}
+		fmt.Fprintf(stdout, "%s%s %s%d: %s\n", location, diagnostic.Category, prefix, diagnostic.Code, message)
 	}
 	if doc.Error != nil {
 		fmt.Fprintf(stderr, "slick: %s: %s\n", doc.Error.Kind, doc.Error.Message)
