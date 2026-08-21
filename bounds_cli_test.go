@@ -105,6 +105,23 @@ func TestBoundsThresholdEqualityPassesAndDescribeUsesSameFacts(t *testing.T) {
 	}
 }
 
+func TestBoundsIgnoreUninvokedNestedCallableBodies(t *testing.T) {
+	root := project(t, `{"compilerOptions":{"strict":true},"include":["src"]}`, map[string]string{
+		"src/main.ts": `export function root(): void {
+  function unused(): void { leaf(); }
+  function leaf(): void {}
+  void unused;
+}`,
+	})
+	writeBounds(t, root, map[string]any{"src/main.ts::root": map[string]int{"maxItems": 0}})
+	output, stderr, code := runSlick(t, root, nil, "bounds", "--json")
+	document := decodeBounds(t, output)
+	if code != 0 || stderr != "" || !document.Success || document.Bounds == nil || len(document.Bounds.Results) != 1 ||
+		len(document.Bounds.Results[0].Unknown) != 0 || document.Bounds.Results[0].Bounds["maxItems"] != 0 {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
 func TestBoundsRejectInvalidContracts(t *testing.T) {
 	root := boundsProject(t)
 	writeFile(t, filepath.Join(root, "slick.contracts.json"), `{"symbols":{"src/main.ts::branch":{"timeoutMs":-1}}}`)

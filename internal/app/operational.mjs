@@ -6,6 +6,7 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
   const canonicalSymbols = new Map();
   const pureConstructions = new Set();
   const identifiers = new Set();
+  const identifierCounts = new Map();
   const syntheticRecords = new Set();
   const packageBySource = new Map();
   for (const dependency of packages) {
@@ -68,6 +69,13 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
     if ((ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent) || ts.isPropertyAssignment(parent)) && parent.name) {
       return parent.name.getText(node.getSourceFile());
     }
+    if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments) {
+      const index = parent.arguments.indexOf(node);
+      if (index >= 0) {
+        const discriminator = index > 0 ? compactText(parent.arguments[index - 1]) : `${index}:${scopeOrdinal(parent)}`;
+        return `callback:${compactText(parent.expression)}[${discriminator}]`;
+      }
+    }
     if (ts.isExportAssignment(parent)) {
       return "default";
     }
@@ -127,6 +135,24 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
         (ts.isObjectLiteralExpression(current.initializer) || ts.isClassExpression(current.initializer))
       ) {
         parts.unshift(current.name.getText(current.getSourceFile()));
+      } else if (ts.isObjectLiteralExpression(current)) {
+        const parent = current.parent;
+        if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments) {
+          const index = parent.arguments.indexOf(current);
+          const owner = parent.parent && (
+            ts.isVariableDeclaration(parent.parent) || ts.isPropertyDeclaration(parent.parent) || ts.isPropertyAssignment(parent.parent)
+          ) && parent.parent.initializer === parent && parent.parent.name
+            ? compactText(parent.parent.name)
+            : undefined;
+          const namedProperty = current.properties.find((property) =>
+            ts.isPropertyAssignment(property) && property.name.getText(property.getSourceFile()) === "name");
+          const discriminator = owner ??
+            (namedProperty && ts.isPropertyAssignment(namedProperty) ? compactText(namedProperty.initializer) : undefined) ??
+            (index > 0 ? compactText(parent.arguments[index - 1]) : `${index}:${scopeOrdinal(parent)}`);
+          parts.unshift(`call:${compactText(parent.expression)}[${discriminator}]`);
+        } else {
+          parts.unshift(`object:${scopeOrdinal(current)}`);
+        }
       } else if (
         (ts.isBlock(current) && !(isCallable(current.parent) && current.parent.body === current)) ||
         ts.isCaseClause(current) ||
@@ -160,11 +186,11 @@ function analyzeOperational(program, projectRoot, ts, packages = []) {
 
   function discover(node) {
     if (isCallable(node) && node.body) {
-      const symbol = symbolName(node);
-      if (symbol) {
-        if (identifiers.has(symbol)) {
-          throw new Error(`duplicate operational symbol ${symbol}`);
-        }
+      const baseSymbol = symbolName(node);
+      if (baseSymbol) {
+        const count = identifierCounts.get(baseSymbol) ?? 0;
+        identifierCounts.set(baseSymbol, count + 1);
+        const symbol = count === 0 ? baseSymbol : `${baseSymbol}#${count + 1}`;
         identifiers.add(symbol);
         const namedNode = nameNode(node) ?? node;
         const record = {

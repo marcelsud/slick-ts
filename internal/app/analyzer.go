@@ -37,6 +37,7 @@ type CacheStats struct {
 }
 type AnalyzeRequest struct {
 	Config              string
+	NeedDescriptions    bool
 	EmitRoot            string
 	CoveragePath        string
 	CoverageQuality     bool

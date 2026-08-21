@@ -150,7 +150,7 @@ const resolved = projectReferenceFailure
 const operational = projectReferenceFailure
   ? { graph: [], cache: { hits: 0, misses: 0 } }
   : analyzeOperational(resolved.program, projectRoot, ts, resolved.packages);
-const descriptions = projectReferenceFailure
+const descriptions = projectReferenceFailure || process.env.SLICK_DESCRIPTIONS !== "1"
   ? []
   : analyzeDescriptions(resolved.program, operational.graph, projectRoot, ts, resolved.packages);
 const slickDiagnostics = projectReferenceFailure

@@ -9,12 +9,13 @@ import (
 )
 
 type apiDocument struct {
-	Version int          `json:"version"`
-	Command string       `json:"command"`
-	Success bool         `json:"success"`
-	API     *apiSnapshot `json:"api"`
-	Changes []apiChange  `json:"changes"`
-	Error   *failure     `json:"error"`
+	Version     int          `json:"version"`
+	Command     string       `json:"command"`
+	Success     bool         `json:"success"`
+	Diagnostics []diagnostic `json:"diagnostics"`
+	API         *apiSnapshot `json:"api"`
+	Changes     []apiChange  `json:"changes"`
+	Error       *failure     `json:"error"`
 }
 
 type apiSnapshot struct {
@@ -30,6 +31,15 @@ type apiChange struct {
 	Old      *json.RawMessage `json:"old"`
 	New      *json.RawMessage `json:"new"`
 	Location *sourceLocation  `json:"location"`
+}
+
+func TestAPISnapshotStillWorksWithOperationalDiagnostics(t *testing.T) {
+	root := apiProject(t, `export function echo(value: any): any { return value; }`)
+	output, stderr, code := runSlick(t, root, nil, "api", "snapshot", "--json")
+	document := decodeAPI(t, output)
+	if code != 0 || stderr != "" || !document.Success || document.API == nil || len(document.API.Contracts) != 1 || len(document.Diagnostics) == 0 {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
 }
 
 func TestAPISnapshotAndDiffClassifyBreakingOperationalChanges(t *testing.T) {
@@ -132,6 +142,27 @@ func TestAPISnapshotScopesDefaultExportsToPackageEntry(t *testing.T) {
 	output, stderr, code := runSlick(t, root, nil, "api", "snapshot", "--json")
 	document := decodeAPI(t, output)
 	if code != 0 || stderr != "" || document.API == nil || len(document.API.Contracts) != 1 {
+		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
+	}
+}
+
+func TestAPIDiffPreservesQualifiedNominalTypeIdentity(t *testing.T) {
+	root := apiProject(t, `export namespace A { export class Token { private brand!: void; } }
+export namespace B { export class Token { private brand!: void; } }
+export function use(value: A.Token): void { void value; }`)
+	if _, _, code := runSlick(t, root, nil, "api", "snapshot"); code != 0 {
+		t.Fatal("snapshot failed")
+	}
+	writeFile(t, filepath.Join(root, "src", "index.ts"), `export namespace A { export class Token { private brand!: void; } }
+export namespace B { export class Token { private brand!: void; } }
+export function use(value: B.Token): void { void value; }`)
+	output, stderr, code := runSlick(t, root, nil, "api", "diff", "--json")
+	document := decodeAPI(t, output)
+	found := false
+	for _, change := range document.Changes {
+		found = found || strings.Contains(change.Symbol, "::use") && change.Breaking
+	}
+	if code != 1 || stderr != "" || document.Success || !found {
 		t.Fatalf("exit %d, stderr %q, output %+v", code, stderr, document)
 	}
 }

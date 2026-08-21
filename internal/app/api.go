@@ -230,10 +230,19 @@ func signatureChanges(symbol string, oldContract, newContract SymbolContract, as
 		compatible := false
 		var matched SignatureDescription
 		for _, newSignature := range newSignatures {
-			if signatureCompatible(oldSignature, newSignature, assignable) {
+			if signaturesEqual(oldSignature, newSignature) {
 				compatible = true
 				matched = newSignature
 				break
+			}
+		}
+		if !compatible {
+			for _, newSignature := range newSignatures {
+				if signatureCompatible(oldSignature, newSignature, assignable) {
+					compatible = true
+					matched = newSignature
+					break
+				}
 			}
 		}
 		if !compatible {
@@ -251,6 +260,10 @@ func signatureChanges(symbol string, oldContract, newContract SymbolContract, as
 }
 
 func signatureCompatible(oldSignature, newSignature SignatureDescription, assignable func(TypeDescription, TypeDescription) bool) bool {
+	if signaturesEqual(oldSignature, newSignature) {
+		return true
+	}
+
 	if len(oldSignature.TypeParameters) != len(newSignature.TypeParameters) {
 		return false
 	}
@@ -281,6 +294,11 @@ func signatureCompatible(oldSignature, newSignature SignatureDescription, assign
 		}
 	}
 	return assignable(oldSignature.Return, newSignature.Return)
+}
+func signaturesEqual(left, right SignatureDescription) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return bytes.Equal(leftJSON, rightJSON)
 }
 
 func requiredParameters(values []ParameterDescription) int {

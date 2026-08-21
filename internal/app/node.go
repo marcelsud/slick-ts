@@ -113,6 +113,7 @@ func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysi
 	cmd.Env = make([]string, 0, len(os.Environ())+3)
 	for _, variable := range os.Environ() {
 		if !strings.HasPrefix(variable, "SLICK_CONFIG_PATH=") &&
+			!strings.HasPrefix(variable, "SLICK_DESCRIPTIONS=") &&
 			!strings.HasPrefix(variable, "SLICK_EMIT_ROOT=") &&
 			!strings.HasPrefix(variable, "SLICK_COVERAGE_PATH=") &&
 			!strings.HasPrefix(variable, "SLICK_COVERAGE_QUALITY=") &&
@@ -133,6 +134,9 @@ func (NodeAnalyzer) Analyze(ctx context.Context, request AnalyzeRequest) Analysi
 		}
 	}
 	cmd.Env = append(cmd.Env, "SLICK_CONFIG_PATH="+request.Config)
+	if request.NeedDescriptions || request.DeadCode || request.Bounds {
+		cmd.Env = append(cmd.Env, "SLICK_DESCRIPTIONS=1")
+	}
 	if request.EmitRoot != "" {
 		cmd.Env = append(cmd.Env, "SLICK_EMIT_ROOT="+request.EmitRoot)
 	}

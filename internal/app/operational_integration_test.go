@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -539,6 +540,37 @@ async function runVault(): Promise<string> {
 		t.Fatalf("resolved object graph has unresolved facts: %+v", runVault.Unresolved)
 	}
 	assertProvenanceSymbols(t, runVault.Errors[0].Provenance, "main.ts::Vault.Client.get:token")
+}
+
+func TestOperationalSymbolsDistinguishRepeatedObjectHandlers(t *testing.T) {
+	result := analyzeOperationalFixture(t, map[string]string{
+		"main.ts": `function action<T extends { handler: () => void }>(value: T): T { return value; }
+const registry = new Map<string, { handler: () => Promise<void> }>();
+function configure(): void {
+  registry.set("first", { handler: async () => {} });
+  registry.set("second", { handler: async () => {} });
+  registry.set("third", { handler: async () => {} });
+  const first = action({ name: "first", handler: () => {} });
+  const second = action({ name: "second", handler: () => {} });
+  void first; void second;
+}
+declare function test(name: string, callback: () => void): void;
+test("one", () => { const handlers = [{ handler: () => {} }]; void handlers; });
+test("two", () => { const handlers = [{ handler: () => {} }]; void handlers; });`,
+	})
+	handlers := []string{}
+	for _, summary := range result.Summaries {
+		if strings.HasSuffix(summary.Symbol, ".handler") {
+			handlers = append(handlers, summary.Symbol)
+		}
+	}
+	unique := map[string]struct{}{}
+	for _, handler := range handlers {
+		unique[handler] = struct{}{}
+	}
+	if len(handlers) != 7 || len(unique) != 7 {
+		t.Fatalf("handler symbols: %v", handlers)
+	}
 }
 
 func analyzeOperationalFixture(t *testing.T, files map[string]string) Analysis {
